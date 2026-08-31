@@ -1,0 +1,15 @@
+# Node
+node_modules/
+
+# Rust build artifacts (top-level and src-tauri/)
+target/
+
+# Tauri generated output
+src-tauri/gen/
+
+# OS
+.DS_Store
+
+# Logs
+*.log
+npm-debug.log*

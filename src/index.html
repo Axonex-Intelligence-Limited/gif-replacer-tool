@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GIF Replacer Tool</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <header>
+        <div>
+            <h1>GIF Replacer Tool</h1>
+        </div>
+    </header>
+
+    <main>
+        <!-- Step 1: LVGL Converter -->
+        <div class="card">
+            <h2>1. Convert GIF to .c File</h2>
+            <p class="hint">Use LVGL Image Converter to generate a .c file from your GIF</p>
+            <button id="open-converter-btn" class="secondary-btn">🔗 Open LVGL Image Converter</button>
+        </div>
+
+        <!-- Step 2: Project Path -->
+        <div class="card">
+            <h2>2. Set EmotionDisplay Project Path</h2>
+            <div class="input-with-button">
+                <input type="text" id="project-path-input" placeholder="/path/to/EmotionDisplay" />
+                <button id="browse-project-btn" class="secondary-btn">📁 Browse</button>
+            </div>
+            <div id="profile-selector" style="display: none; margin-top: 15px;">
+                <label for="profile-select" style="display: block; margin-bottom: 5px; font-weight: 500;">Active Profile:</label>
+                <div class="input-with-button">
+                    <select id="profile-select" class="profile-select">
+                        <option value="">Loading...</option>
+                    </select>
+                    <button id="clone-profile-btn" class="secondary-btn" disabled>➕ Clone</button>
+                </div>
+            </div>
+            <p id="profile-name" class="hint">No profile loaded</p>
+        </div>
+
+        <!-- Step 3: Drop Zone -->
+        <div class="card">
+            <h2>3. Drop Your .c File</h2>
+            <div id="drop-area" class="drop-area">
+                <div id="drop-placeholder">
+                    <p>📁 Drag & drop your .c file here</p>
+                    <p class="hint">Or click to browse</p>
+                </div>
+                <div id="file-info" style="display: none;">
+                    <p><strong>File:</strong> <span id="file-name"></span></p>
+                    <p><strong>Size:</strong> <span id="file-size"></span> bytes</p>
+                    <button id="clear-file-btn" class="secondary-btn">Clear</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Emotion Selector -->
+        <div class="card">
+            <h2>4. Select Target Emotion</h2>
+            <div id="emotions-container">
+                <p class="hint">Loading emotions...</p>
+            </div>
+            <div id="default-emotion-section" style="display: none; margin-top: 15px; padding-top: 15px; border-top: 1px solid #eee;">
+                <label for="default-emotion-select" style="display: block; margin-bottom: 5px; font-weight: 500;">
+                    Default Startup Emotion:
+                </label>
+                <div class="input-with-button">
+                    <select id="default-emotion-select" class="profile-select">
+                        <option value="">Loading...</option>
+                    </select>
+                    <button id="set-default-btn" class="secondary-btn">Set Default</button>
+                    <button id="reset-default-btn" class="secondary-btn" style="display: none;">Reset Default</button>
+                </div>
+                <p class="hint">This emotion will show when the device powers on</p>
+            </div>
+        </div>
+
+        <!-- Serial Port -->
+        <div class="card">
+            <h2>5. Serial Port</h2>
+            <div class="input-with-button">
+                <select id="serial-port-select" class="profile-select">
+                    <option value="">Select a port...</option>
+                </select>
+                <button id="scan-ports-btn" class="secondary-btn">🔄 Scan</button>
+            </div>
+            <p class="hint">Or manually enter: <input type="text" id="serial-port" placeholder="/dev/cu.usbserial-210 or COM3" style="display: inline-block; width: 300px; margin-left: 5px;" /></p>
+        </div>
+
+        <!-- Action Button -->
+        <div class="card">
+            <div id="status" class="status idle">Ready</div>
+            <button id="run-btn" class="primary-btn" disabled>Replace & Build & Flash</button>
+        </div>
+
+        <!-- Output Log -->
+        <div class="card">
+            <h2>Build Output</h2>
+            <div id="output-log" class="log"></div>
+        </div>
+    </main>
+
+    <script src="app.js"></script>
+</body>
+</html>

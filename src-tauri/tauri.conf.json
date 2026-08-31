@@ -1,0 +1,50 @@
+{
+  "build": {
+    "beforeDevCommand": "",
+    "beforeBuildCommand": "",
+    "devPath": "../src",
+    "distDir": "../src",
+    "withGlobalTauri": true
+  },
+  "package": {
+    "productName": "GIF Replacer Tool",
+    "version": "1.0.0"
+  },
+  "tauri": {
+    "allowlist": {
+      "all": false,
+      "dialog": {
+        "all": false,
+        "open": true
+      },
+      "fs": {
+        "all": false,
+        "readFile": true,
+        "scope": ["$HOME/**"]
+      },
+      "shell": {
+        "all": false,
+        "open": true
+      }
+    },
+    "bundle": {
+      "active": false,
+      "identifier": "com.axonex.gif-replacer-tool",
+      "icon": [],
+      "resources": [],
+      "targets": "all"
+    },
+    "windows": [
+      {
+        "fullscreen": false,
+        "resizable": true,
+        "title": "GIF Replacer Tool",
+        "width": 900,
+        "height": 700,
+        "minWidth": 800,
+        "minHeight": 600,
+        "fileDropEnabled": true
+      }
+    ]
+  }
+}
