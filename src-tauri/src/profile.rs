@@ -34,6 +34,7 @@ impl std::fmt::Display for ProfileError {
 pub struct ProfileInfo {
     pub profile: String,
     pub emotions: Vec<String>,
+    pub symbols: Vec<String>,
     pub profile_path: PathBuf,
 }
 
@@ -89,9 +90,14 @@ pub fn detect_active_profile(project_path: &str) -> Result<ProfileInfo, ProfileE
         return Err(ProfileError::ProfileFolderMissing(profile.clone()));
     }
 
-    // Parse gif_profile.h for emotion names
+    // Parse gif_profile.h for emotion names (gif_table keys) and symbol names
+    // (extern const lv_img_dsc_t declarations).
     let gif_header = profile_path.join("gif_profile.h");
     let emotions = parse_gif_table(&gif_header)
+        .map_err(|_| ProfileError::MalformedGifTable(
+            gif_header.to_string_lossy().to_string()
+        ))?;
+    let symbols = parse_gif_symbols(&gif_header)
         .map_err(|_| ProfileError::MalformedGifTable(
             gif_header.to_string_lossy().to_string()
         ))?;
@@ -99,6 +105,7 @@ pub fn detect_active_profile(project_path: &str) -> Result<ProfileInfo, ProfileE
     Ok(ProfileInfo {
         profile,
         emotions,
+        symbols,
         profile_path
     })
 }
@@ -118,6 +125,25 @@ fn parse_gif_table(header_path: &Path) -> Result<Vec<String>, ()> {
     }
 
     Ok(emotions)
+}
+
+/// Parses the `extern const lv_img_dsc_t <name>;` declarations — the symbol
+/// names valid for `#define GIF_PROFILE_DEFAULT <name>`. This is a distinct
+/// list from `parse_gif_table`: the table maps keys like "startup"/"standby"
+/// onto a handful of symbols, and only symbols are valid defaults.
+fn parse_gif_symbols(header_path: &Path) -> Result<Vec<String>, ()> {
+    let content = fs::read_to_string(header_path).map_err(|_| ())?;
+
+    let symbol_re = Regex::new(r"extern\s+const\s+lv_img_dsc_t\s+(\w+)\s*;").unwrap();
+    let symbols: Vec<String> = symbol_re.captures_iter(&content)
+        .filter_map(|cap| cap.get(1).map(|m| m.as_str().to_string()))
+        .collect();
+
+    if symbols.is_empty() {
+        return Err(());
+    }
+
+    Ok(symbols)
 }
 
 /// Lists all available profiles in the project by scanning main/ directory
@@ -198,7 +224,65 @@ pub fn set_active_profile(project_path: &str, profile_name: &str) -> Result<(), 
     fs::write(&sdkconfig, updated)
         .map_err(|e| ProfileError::WriteError(e.to_string()))?;
 
+    // Keep the *generated* sdkconfig in sync too. idf.py build reads the
+    // generated sdkconfig, and sdkconfig.defaults alone only takes effect when
+    // sdkconfig is first generated — so editing defaults by itself leaves a
+    // stale sdkconfig behind and the build keeps compiling the old profile.
+    update_sdkconfig(project_path, profile_name)?;
+
     Ok(())
+}
+
+/// Rewrites the generated `sdkconfig` (the file `idf.py build` actually reads)
+/// so the active profile choice + name match `profile_name`. A no-op if the
+/// generated file doesn't exist yet (it will be created from defaults).
+fn update_sdkconfig(project_path: &str, profile_name: &str) -> Result<(), ProfileError> {
+    let sdkconfig = Path::new(project_path).join("sdkconfig");
+    if !sdkconfig.exists() {
+        return Ok(());
+    }
+
+    let content = fs::read_to_string(&sdkconfig)
+        .map_err(|e| ProfileError::WriteError(e.to_string()))?;
+
+    let base = base_of(profile_name).to_uppercase();
+    let symbol_re = Regex::new(r"CONFIG_GIF_PROFILE_([A-Za-z0-9_]+)").unwrap();
+
+    let mut name_written = false;
+    let mut out = String::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("CONFIG_GIF_PROFILE_NAME") {
+            out.push_str(&format!("CONFIG_GIF_PROFILE_NAME=\"{}\"\n", profile_name));
+            name_written = true;
+        } else if let Some(cap) = symbol_re.captures(trimmed) {
+            let short = cap.get(1).map(|m| m.as_str()).unwrap_or("");
+            if short == base {
+                out.push_str(&format!("CONFIG_GIF_PROFILE_{}=y\n", base));
+            } else {
+                out.push_str(&format!("# CONFIG_GIF_PROFILE_{} is not set\n", short));
+            }
+        } else {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+
+    if !name_written {
+        out.push_str(&format!("CONFIG_GIF_PROFILE_NAME=\"{}\"\n", profile_name));
+    }
+
+    fs::write(&sdkconfig, out).map_err(|e| ProfileError::WriteError(e.to_string()))?;
+    Ok(())
+}
+
+/// Ensures the generated `sdkconfig` matches the active profile named in
+/// `sdkconfig.defaults`. `idf.py build` reads the generated sdkconfig (and its
+/// value overrides defaults), so this must run before building.
+pub fn sync_generated_sdkconfig(project_path: &str) -> Result<(), ProfileError> {
+    let active = detect_active_profile(project_path)?;
+    update_sdkconfig(project_path, &active.profile)
 }
 
 /// Gets the current default emotion from gif_profile.h
@@ -223,10 +307,11 @@ pub fn get_default_emotion(project_path: &str) -> Result<String, ProfileError> {
 pub fn set_default_emotion(project_path: &str, emotion: &str) -> Result<(), ProfileError> {
     let profile = detect_active_profile(project_path)?;
 
-    // Verify the emotion exists in the profile
-    if !profile.emotions.contains(&emotion.to_string()) {
+    // Verify the symbol exists in the profile (must be a real lv_img_dsc_t,
+    // not a gif_table key like "startup"/"standby").
+    if !profile.symbols.contains(&emotion.to_string()) {
         return Err(ProfileError::MalformedGifTable(
-            format!("Emotion '{}' not found in profile", emotion)
+            format!("'{}' is not a valid default emotion symbol in this profile", emotion)
         ));
     }
 
@@ -458,6 +543,26 @@ mod tests {
     }
 
     #[test]
+    fn test_symbols_parsed_separately_from_keys() {
+        let root = tmp_project();
+        let dir = root.join("main").join("floki");
+        fs::create_dir_all(dir.join("gif")).unwrap();
+        fs::write(
+            dir.join("gif_profile.h"),
+            "extern \"C\" {\n    extern const lv_img_dsc_t findingWifi;\n    extern const lv_img_dsc_t happy;\n}\n\n#define GIF_PROFILE_DEFAULT findingWifi\n\nstruct GifEntry { const char* name; const lv_img_dsc_t* dsc; };\nstatic const GifEntry gif_table[] = {\n    {\"startup\", &findingWifi},\n    {\"happy\", &happy},\n};\n",
+        )
+        .unwrap();
+        fs::write(root.join("sdkconfig.defaults"), "CONFIG_GIF_PROFILE_FLOKI=y\n").unwrap();
+
+        let info = detect_active_profile(&root.to_string_lossy()).unwrap();
+        // Keys come from gif_table[]; symbols come from the extern declarations.
+        assert_eq!(info.emotions, vec!["startup", "happy"]);
+        assert_eq!(info.symbols, vec!["findingWifi", "happy"]);
+        assert!(!info.symbols.contains(&"startup".to_string()));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn test_set_active_profile_writes_name_override() {
         let root = tmp_project();
         write_profile(&root, "floki", "angry", &["angry", "happy"]);
@@ -491,6 +596,58 @@ mod tests {
         // The commented-out alternatives must NOT be clobbered by the regex.
         assert!(sdk.contains("# CONFIG_GIF_PROFILE_BDUCK=y"));
         assert!(sdk.contains("# CONFIG_GIF_PROFILE_PENGU=y"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_set_active_profile_syncs_generated_sdkconfig() {
+        let root = tmp_project();
+        write_profile(&root, "floki", "angry", &["angry"]);
+        write_profile(&root, "floki_1", "happy", &["angry", "happy"]);
+        fs::write(
+            root.join("sdkconfig.defaults"),
+            "CONFIG_GIF_PROFILE_FLOKI=y\nCONFIG_GIF_PROFILE_NAME=\"floki_1\"\n",
+        )
+        .unwrap();
+        // A stale generated sdkconfig still pointing at the base profile.
+        fs::write(
+            root.join("sdkconfig"),
+            "CONFIG_GIF_PROFILE_FLOKI=y\n# CONFIG_GIF_PROFILE_PENGU is not set\n# CONFIG_GIF_PROFILE_BDUCK is not set\nCONFIG_GIF_PROFILE_NAME=\"floki\"\n",
+        )
+        .unwrap();
+
+        set_active_profile(&root.to_string_lossy(), "floki_1").unwrap();
+
+        let sdk = fs::read_to_string(root.join("sdkconfig")).unwrap();
+        assert!(sdk.contains("CONFIG_GIF_PROFILE_NAME=\"floki_1\""));
+        assert!(sdk.contains("CONFIG_GIF_PROFILE_FLOKI=y"));
+        assert!(sdk.contains("# CONFIG_GIF_PROFILE_PENGU is not set"));
+        assert!(sdk.contains("# CONFIG_GIF_PROFILE_BDUCK is not set"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_sync_generated_sdkconfig() {
+        let root = tmp_project();
+        write_profile(&root, "floki", "angry", &["angry"]);
+        write_profile(&root, "floki_1", "happy", &["angry", "happy"]);
+        fs::write(
+            root.join("sdkconfig.defaults"),
+            "CONFIG_GIF_PROFILE_FLOKI=y\nCONFIG_GIF_PROFILE_NAME=\"floki_1\"\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("sdkconfig"),
+            "CONFIG_GIF_PROFILE_FLOKI=y\n# CONFIG_GIF_PROFILE_PENGU is not set\n# CONFIG_GIF_PROFILE_BDUCK is not set\nCONFIG_GIF_PROFILE_NAME=\"floki\"\n",
+        )
+        .unwrap();
+
+        // Sync reads the active profile from defaults and rewrites the generated
+        // sdkconfig to match.
+        sync_generated_sdkconfig(&root.to_string_lossy()).unwrap();
+
+        let sdk = fs::read_to_string(root.join("sdkconfig")).unwrap();
+        assert!(sdk.contains("CONFIG_GIF_PROFILE_NAME=\"floki_1\""));
         let _ = fs::remove_dir_all(&root);
     }
 

@@ -75,6 +75,24 @@ pub fn replace_gif_file(
     Ok(())
 }
 
+/// Resolves the ESP-IDF install to use for build/flash. The firmware requires
+/// ESP-IDF **v5.5.2** — v6.2 reshapes the LCD panel struct and breaks the
+/// build — so prefer the known-good checkout at `~/esp/esp-idf-v5.5.2` and only
+/// fall back to `$IDF_PATH` when that's absent.
+fn resolve_idf_path() -> Result<String, BuilderError> {
+    if let Ok(home) = std::env::var("HOME") {
+        let known = format!("{}/esp/esp-idf-v5.5.2", home);
+        if std::path::Path::new(&known).join("export.sh").exists() {
+            return Ok(known);
+        }
+    }
+    std::env::var("IDF_PATH").map_err(|_| {
+        BuilderError::IdfNotFound(
+            "ESP-IDF v5.5.2 not found. Install it at ~/esp/esp-idf-v5.5.2 or set $IDF_PATH.".to_string(),
+        )
+    })
+}
+
 /// Runs ESP-IDF build command
 ///
 /// # Arguments
@@ -84,17 +102,17 @@ pub fn replace_gif_file(
 /// * `Ok(BuildResult)` - Build completed (check success field)
 /// * `Err(BuilderError)` - Command execution failed
 pub fn run_build_sync(project_path: &str) -> Result<BuildResult, BuilderError> {
-    // Check $IDF_PATH environment variable
-    let idf_path = std::env::var("IDF_PATH").map_err(|_| {
-        BuilderError::IdfNotFound(
-            "Set $IDF_PATH or run: source ~/esp/esp-idf/export.sh".to_string(),
-        )
-    })?;
+    let idf_path = resolve_idf_path()?;
 
-    // Run build command
+    // Run build command. Unset inherited IDF env vars first: a stale
+    // IDF_PYTHON_ENV_PATH from a prior v6.2 activation would otherwise make
+    // `idf.py` run under the wrong python and halt with "Run fullclean".
     let output = Command::new("sh")
         .arg("-c")
-        .arg(format!("source {}/export.sh && idf.py build", idf_path))
+        .arg(format!(
+            "unset IDF_PATH IDF_PYTHON_ENV_PATH VIRTUAL_ENV; source {}/export.sh && idf.py build",
+            idf_path
+        ))
         .current_dir(project_path)
         .output()
         .map_err(|e| BuilderError::BuildFailed(-1, e.to_string()))?;
@@ -120,12 +138,7 @@ pub fn run_build_sync(project_path: &str) -> Result<BuildResult, BuilderError> {
 /// * `Ok(BuildResult)` - Flash completed (check success field)
 /// * `Err(BuilderError)` - Command execution failed
 pub fn run_flash_sync(project_path: &str, serial_port: &str) -> Result<BuildResult, BuilderError> {
-    // Check $IDF_PATH environment variable
-    let idf_path = std::env::var("IDF_PATH").map_err(|_| {
-        BuilderError::IdfNotFound(
-            "Set $IDF_PATH or run: source ~/esp/esp-idf/export.sh".to_string(),
-        )
-    })?;
+    let idf_path = resolve_idf_path()?;
 
     // Verify serial port exists
     if !std::path::Path::new(serial_port).exists() {
@@ -135,11 +148,11 @@ pub fn run_flash_sync(project_path: &str, serial_port: &str) -> Result<BuildResu
         )));
     }
 
-    // Run flash command
+    // Run flash command (same env cleanup as build — see run_build_sync).
     let output = Command::new("sh")
         .arg("-c")
         .arg(format!(
-            "source {}/export.sh && idf.py -p {} flash",
+            "unset IDF_PATH IDF_PYTHON_ENV_PATH VIRTUAL_ENV; source {}/export.sh && idf.py -p {} flash",
             idf_path, serial_port
         ))
         .current_dir(project_path)
@@ -183,6 +196,7 @@ mod tests {
         let profile = ProfileInfo {
             profile: "test".to_string(),
             emotions: vec!["angry".to_string(), "happy".to_string()],
+            symbols: vec!["angry".to_string(), "happy".to_string()],
             profile_path: PathBuf::from("/tmp/test"),
         };
 
@@ -195,6 +209,7 @@ mod tests {
         let profile = ProfileInfo {
             profile: "test".to_string(),
             emotions: vec!["angry".to_string(), "happy".to_string()],
+            symbols: vec!["angry".to_string(), "happy".to_string()],
             profile_path: PathBuf::from("/tmp/test_nonexistent"),
         };
 

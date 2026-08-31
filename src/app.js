@@ -27,6 +27,7 @@ async function initApp() {
     let currentEmotion = null;
     let config = null;
     let emotions = [];
+    let symbols = [];
     let activeProfile = null;
 
     // DOM Elements
@@ -166,7 +167,9 @@ async function initApp() {
             profileName.classList.remove('hint', 'error-text');
             profileName.classList.add('success-text');
             emotions = result.emotions;
+            symbols = result.symbols || [];
             renderEmotions(emotions);
+            renderDefaultEmotionOptions(symbols);
 
             // Load default emotion
             await loadDefaultEmotion();
@@ -183,17 +186,17 @@ async function initApp() {
             emotionsContainer.innerHTML = `<p class="hint error">Failed to load profile. Make sure the path points to the EmotionDisplay project root.</p>`;
             profileSelector.style.display = 'none';
             emotions = [];
+            symbols = [];
             activeProfile = null;
             cloneProfileBtn.disabled = true;
             resetDefaultBtn.style.display = 'none';
         }
     }
 
-    // Render emotion radio buttons
+    // Render emotion radio buttons (gif_table keys — used to pick a replace slot)
     function renderEmotions(emotionsList) {
         if (emotionsList.length === 0) {
             emotionsContainer.innerHTML = '<p class="hint">No emotions found</p>';
-            defaultEmotionSection.style.display = 'none';
             return;
         }
 
@@ -222,16 +225,23 @@ async function initApp() {
 
         emotionsContainer.innerHTML = '';
         emotionsContainer.appendChild(grid);
+    }
 
-        // Show default emotion section
+    // Populate the default-emotion dropdown from the profile's C symbols
+    // (the names valid for `#define GIF_PROFILE_DEFAULT <name>`), NOT from the
+    // gif_table[] keys. gif_table maps keys like "startup"/"standby" onto a
+    // handful of shared symbols, and only symbols are valid defaults.
+    function renderDefaultEmotionOptions(symbolsList) {
+        if (symbolsList.length === 0) {
+            defaultEmotionSection.style.display = 'none';
+            return;
+        }
         defaultEmotionSection.style.display = 'block';
-
-        // Populate default emotion dropdown
         defaultEmotionSelect.innerHTML = '';
-        emotionsList.forEach(emotion => {
+        symbolsList.forEach(symbol => {
             const option = document.createElement('option');
-            option.value = emotion;
-            option.textContent = emotion;
+            option.value = symbol;
+            option.textContent = symbol;
             defaultEmotionSelect.appendChild(option);
         });
     }
@@ -384,6 +394,61 @@ async function initApp() {
             alert(`Reset failed: ${err}`);
         } finally {
             resetDefaultBtn.disabled = false;
+        }
+    });
+
+    // Change the default startup emotion (write header + build & flash so it
+    // actually reaches the board)
+    setDefaultBtn.addEventListener('click', async () => {
+        if (!config.project_path) {
+            alert('Please set the project path first');
+            return;
+        }
+        const emotion = defaultEmotionSelect.value;
+        if (!emotion) {
+            alert('Please select a default emotion');
+            return;
+        }
+        const selectedPort = serialPortSelect.value || serialPortInput.value.trim();
+        if (!selectedPort) {
+            alert('Please select a serial port (needed to flash the change)');
+            return;
+        }
+
+        setDefaultBtn.disabled = true;
+        setStatus('running', 'Setting default + building & flashing...');
+        outputLog.textContent = '';
+
+        // Save serial port to config
+        config.last_serial_port = selectedPort;
+        try {
+            await invoke('save_config', { config });
+        } catch (err) {
+            console.error('Failed to save serial port:', err);
+        }
+
+        try {
+            await invoke('set_default_emotion', {
+                projectPath: config.project_path,
+                emotion,
+            });
+            logOutput(`✓ Default startup emotion set to: ${emotion}`);
+            await loadDefaultEmotion();
+
+            const result = await invoke('build_and_flash', {
+                projectPath: config.project_path,
+                serialPort: selectedPort,
+            });
+            if (result.success) {
+                setStatus('success', result.message);
+            } else {
+                setStatus('error', result.message);
+            }
+        } catch (err) {
+            setStatus('error', 'Error: ' + err);
+            logOutput('❌ ' + err);
+        } finally {
+            setDefaultBtn.disabled = false;
         }
     });
 

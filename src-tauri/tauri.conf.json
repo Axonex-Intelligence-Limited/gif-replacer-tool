@@ -15,6 +15,7 @@
       "all": false,
       "dialog": {
         "all": false,
+        "message": true,
         "open": true
       },
       "fs": {

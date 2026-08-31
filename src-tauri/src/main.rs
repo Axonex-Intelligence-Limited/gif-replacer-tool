@@ -25,6 +25,7 @@ fn get_active_profile(project_path: String) -> Result<ProfileResponse, String> {
     Ok(ProfileResponse {
         active_profile: profile.profile,
         emotions: profile.emotions,
+        symbols: profile.symbols,
     })
 }
 
@@ -111,6 +112,7 @@ fn list_serial_ports() -> Result<Vec<SerialPortInfo>, String> {
 struct ProfileResponse {
     active_profile: String,
     emotions: Vec<String>,
+    symbols: Vec<String>,
 }
 
 #[tauri::command]
@@ -152,7 +154,28 @@ async fn replace_and_build_flash(
 
     emit_log(&app_handle, &format!("✓ Replaced main/{}/gif/{}.c", profile.profile, target_emotion));
 
-    // Step 3: Build
+    // Step 3: Build + flash
+    let mut result = do_build_and_flash(app_handle, project_path, serial_port).await?;
+    if result.success {
+        result.message = "✅ Done! GIF updated on board.".to_string();
+    }
+    Ok(result)
+}
+
+/// Shared build + flash step, used by both the replace flow and the
+/// set-default-emotion flow.
+async fn do_build_and_flash(
+    app_handle: tauri::AppHandle,
+    project_path: String,
+    serial_port: String,
+) -> Result<BuildFlashResponse, String> {
+    // idf.py build reads the generated sdkconfig, whose value overrides
+    // sdkconfig.defaults — so sync it to the active profile before building,
+    // otherwise the build compiles the wrong profile (e.g. the base instead of
+    // the clone).
+    profile::sync_generated_sdkconfig(&project_path)
+        .map_err(|e| e.to_string())?;
+
     emit_log(&app_handle, "🔨 Starting build (this takes 2-3 minutes)...");
     let build_result = tokio::task::spawn_blocking({
         let project_path = project_path.clone();
@@ -185,10 +208,11 @@ async fn replace_and_build_flash(
 
     emit_log(&app_handle, "✓ Build succeeded");
 
-    // Step 4: Flash
+    // Flash
     emit_log(&app_handle, &format!("⚡ Starting flash to {}...", serial_port));
     let flash_result = tokio::task::spawn_blocking({
         let app_handle = app_handle.clone();
+        let serial_port = serial_port.clone();
         move || {
             match builder::run_flash_sync(&project_path, &serial_port) {
                 Ok(result) => {
@@ -211,11 +235,26 @@ async fn replace_and_build_flash(
     Ok(BuildFlashResponse {
         success: flash_result.success,
         message: if flash_result.success {
-            "✅ Done! GIF updated on board.".to_string()
+            "✅ Done! Build and flash complete.".to_string()
         } else {
             format!("Flash failed with exit code {}", flash_result.exit_code)
         },
     })
+}
+
+/// Builds and flashes without replacing a GIF file — used after changing the
+/// default startup emotion so the new value is actually written to the board.
+#[tauri::command]
+async fn build_and_flash(
+    app_handle: tauri::AppHandle,
+    project_path: String,
+    serial_port: String,
+) -> Result<BuildFlashResponse, String> {
+    let mut result = do_build_and_flash(app_handle, project_path, serial_port).await?;
+    if result.success {
+        result.message = "✅ Done! Default emotion updated on board.".to_string();
+    }
+    Ok(result)
 }
 
 #[derive(serde::Serialize)]
@@ -259,6 +298,7 @@ fn main() {
             list_serial_ports,
             validate_c_file,
             replace_and_build_flash,
+            build_and_flash,
             browse_folder,
         ])
         .run(tauri::generate_context!())

@@ -1,6 +1,6 @@
 # GIF Replacer Tool
 
-**Status**: Phase 1 (CLI logic) + Phase 2 (Tauri desktop GUI) complete and working.
+**Status**: Phase 1 (CLI logic) + Phase 2 (Tauri desktop GUI) + profile clone/reset complete and working.
 
 A desktop app that lets a non-technical user drag in an LVGL-converted `.c` GIF file, pick an emotion slot, and have it renamed, wired into the active EmotionDisplay profile, built, and flashed to the ESP32 board — no terminal required.
 
@@ -14,6 +14,8 @@ A desktop app that lets a non-technical user drag in an LVGL-converted `.c` GIF 
 6. **Pick emotion slot** — radio grid built from the active profile's `gif_table[]` entries.
 7. **Serial port** — dropdown auto-populated via `serialport` crate on app launch, with a manual 🔄 Scan button and a manual text-entry fallback. Deduplicated on macOS (see Known Issues below).
 8. **Replace & Build & Flash** — renames the array/descriptor symbols to match the target emotion, overwrites `main/<profile>/gif/<emotion>.c`, runs `idf.py build` then `idf.py -p <port> flash`, streaming full output live to an in-app log.
+9. **Clone profile** — "➕ Clone" button copies the active profile's base into a numbered clone (`floki_1`, `floki_2`, …) and switches to it, so base profiles are never edited directly.
+10. **Reset default** — "Reset Default" button restores a clone's startup emotion (`#define GIF_PROFILE_DEFAULT`) to its base profile's value, leaving all GIF `.c` files untouched.
 
 ## Tech stack
 
@@ -54,12 +56,12 @@ All Rust modules have unit tests. Run with:
 ```bash
 cd src-tauri && cargo test
 ```
-11 tests currently pass (profile, parser, builder, config).
+23 tests currently pass (profile, parser, builder, config).
 
 ## Known issues
 
 - **Stray home-directory git repo (historical)**: `/Users/anthony/.git` still exists (unrelated to this project). This project now has its own git repo (scoped to `gif-replacer-tool/`), so `git status`/`git log` no longer walk up into it.
 
-## Not yet implemented (planned)
+## Repository
 
-- **Profile clone + reset workflow**: instead of editing base profiles (`floki`/`bduck`/`pengu`) directly, users would create numbered clones (`floki_1`, etc.) to experiment on, with a "Reset to Default" button that deletes the clone and re-copies from the base profile. Design is drafted (see conversation history) but not implemented — needs `create_profile_clone`, `reset_profile_to_default` in `profile.rs`, two new Tauri commands, and UI buttons next to the profile selector.
+https://github.com/Axonex-Intelligence-Limited/gif-replacer-tool (private)
