@@ -2,6 +2,7 @@
 
 use std::fs;
 use std::process::Command;
+use regex::Regex;
 use crate::profile::ProfileInfo;
 
 /// Errors that can occur during build/flash operations
@@ -98,6 +99,81 @@ fn resolve_idf_path() -> Result<String, BuilderError> {
         BuilderError::IdfNotFound(
             "ESP-IDF v5.5.2 not found. Install it at ~/esp/esp-idf-v5.5.2 or set $IDF_PATH.".to_string(),
         )
+    })
+}
+
+/// App partition size from EmotionDisplay/partitions.csv:
+/// `factory, app, factory, 0x10000, 0x500000`.
+pub const APP_PARTITION_BYTES: u64 = 0x500000;
+
+#[derive(Debug)]
+pub struct BudgetCheck {
+    pub incoming_bytes: u64,
+    pub current_bytes: u64,
+    pub headroom_bytes: Option<u64>,
+    pub delta_bytes: i64,
+    pub overflows: bool,
+}
+
+/// Pulls `.data_size` out of a generated LVGL .c file. Returns None when the
+/// slot does not exist yet, or the file has no recognisable data_size.
+fn read_current_size(c_file: &std::path::Path) -> Option<u64> {
+    let text = fs::read_to_string(c_file).ok()?;
+    let re = Regex::new(r"\.data_size\s*=\s*(\d+)").ok()?;
+    re.captures(&text)?.get(1)?.as_str().parse().ok()
+}
+
+/// Measures free space in the app partition from the last build's application
+/// binary. Excludes the bootloader and partition table — the largest remaining
+/// .bin is the app image.
+///
+/// Returns None when the project has never been built.
+fn measure_headroom(project: &std::path::Path) -> Option<u64> {
+    let entries = fs::read_dir(project.join("build")).ok()?;
+
+    let app_size = entries
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            name.ends_with(".bin")
+                && !name.contains("bootloader")
+                && !name.contains("partition-table")
+        })
+        .filter_map(|e| e.metadata().ok())
+        .map(|m| m.len())
+        .max()?;
+
+    Some(APP_PARTITION_BYTES.saturating_sub(app_size))
+}
+
+/// Warns when replacing a slot with a much larger GIF would overflow the app
+/// partition. Advisory only — the caller decides whether to proceed, since
+/// freeing space first (nullptr gif_table entries) is a legitimate answer.
+pub fn check_flash_budget(
+    project_path: &str,
+    profile: &ProfileInfo,
+    emotion: &str,
+    incoming_bytes: u64,
+) -> Result<BudgetCheck, BuilderError> {
+    let c_file = profile.profile_path.join("gif").join(format!("{}.c", emotion));
+    let current_bytes = read_current_size(&c_file).unwrap_or(0);
+    let delta_bytes = incoming_bytes as i64 - current_bytes as i64;
+    let headroom_bytes = measure_headroom(std::path::Path::new(project_path));
+
+    // Overflows only when we can actually measure the budget and the delta
+    // exceeds it. An unbuilt project reports overflows=false and lets the
+    // frontend say the headroom is unknown.
+    let overflows = match headroom_bytes {
+        Some(h) => delta_bytes > h as i64,
+        None => false,
+    };
+
+    Ok(BudgetCheck {
+        incoming_bytes,
+        current_bytes,
+        headroom_bytes,
+        delta_bytes,
+        overflows,
     })
 }
 
@@ -239,5 +315,46 @@ mod tests {
             !profile.profile_path.exists(),
             "validate_emotion must not create or write anything"
         );
+    }
+
+    #[test]
+    fn test_read_current_size_parses_data_size() {
+        let dir = std::env::temp_dir().join(format!("gif_tool_budget_{}", std::process::id()));
+        let gif_dir = dir.join("gif");
+        fs::create_dir_all(&gif_dir).unwrap();
+        fs::write(
+            gif_dir.join("angry.c"),
+            "const lv_img_dsc_t angry = {\n  .data_size = 70149,\n};\n",
+        )
+        .unwrap();
+
+        assert_eq!(read_current_size(&gif_dir.join("angry.c")), Some(70149));
+    }
+
+    #[test]
+    fn test_read_current_size_returns_none_for_new_slot() {
+        let missing = std::env::temp_dir().join("gif_tool_budget_absent.c");
+        let _ = fs::remove_file(&missing);
+        assert_eq!(read_current_size(&missing), None);
+    }
+
+    #[test]
+    fn test_measure_headroom_uses_largest_app_binary() {
+        let dir = std::env::temp_dir().join(format!("gif_tool_build_{}", std::process::id()));
+        let build = dir.join("build");
+        fs::create_dir_all(&build).unwrap();
+        fs::write(build.join("bootloader.bin"), vec![0u8; 100]).unwrap();
+        fs::write(build.join("partition-table.bin"), vec![0u8; 100]).unwrap();
+        fs::write(build.join("lvgl_porting.bin"), vec![0u8; 4_595_472]).unwrap();
+
+        let headroom = measure_headroom(&dir).unwrap();
+        assert_eq!(headroom, APP_PARTITION_BYTES - 4_595_472);
+    }
+
+    #[test]
+    fn test_measure_headroom_none_without_build() {
+        let dir = std::env::temp_dir().join(format!("gif_tool_nobuild_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(measure_headroom(&dir), None);
     }
 }
