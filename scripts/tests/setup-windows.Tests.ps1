@@ -213,3 +213,38 @@ Describe 'Get-BridgeFromHardwareIds' {
         Get-BridgeFromHardwareIds -HardwareIds $ids | Should -Be 'CH340'
     }
 }
+
+Describe 'Merge-ToolConfig' {
+    It 'sets idf_path on an empty config' {
+        $o = (Merge-ToolConfig -ExistingJson '' -IdfPath 'C:\Espressif\frameworks\esp-idf-v5.5.2') |
+            ConvertFrom-Json
+        $o.idf_path | Should -Be 'C:\Espressif\frameworks\esp-idf-v5.5.2'
+    }
+
+    It 'preserves project_path and last_serial_port' {
+        # The app owns this file. Overwriting it would silently cost the user
+        # their project location and port choice.
+        $existing = '{"project_path":"C:\\dev\\EmotionDisplay","idf_path":null,"last_serial_port":"COM3"}'
+        $o = (Merge-ToolConfig -ExistingJson $existing -IdfPath 'C:\Espressif') | ConvertFrom-Json
+        $o.project_path    | Should -Be 'C:\dev\EmotionDisplay'
+        $o.last_serial_port | Should -Be 'COM3'
+        $o.idf_path        | Should -Be 'C:\Espressif'
+    }
+
+    It 'replaces an existing idf_path' {
+        $existing = '{"idf_path":"C:\\stale","project_path":null,"last_serial_port":null}'
+        $o = (Merge-ToolConfig -ExistingJson $existing -IdfPath 'C:\Espressif') | ConvertFrom-Json
+        $o.idf_path | Should -Be 'C:\Espressif'
+    }
+
+    It 'survives a corrupted config rather than throwing' {
+        # A hand-edited or truncated file must not abort setup at the last step.
+        $o = (Merge-ToolConfig -ExistingJson '{not json' -IdfPath 'C:\Espressif') | ConvertFrom-Json
+        $o.idf_path | Should -Be 'C:\Espressif'
+    }
+
+    It 'round-trips a path containing backslashes' {
+        $o = (Merge-ToolConfig -ExistingJson '' -IdfPath 'C:\a\b\esp-idf-v5.5.2') | ConvertFrom-Json
+        $o.idf_path | Should -Be 'C:\a\b\esp-idf-v5.5.2'
+    }
+}

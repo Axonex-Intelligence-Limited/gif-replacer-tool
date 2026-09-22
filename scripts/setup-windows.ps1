@@ -241,6 +241,26 @@ function Get-BridgeFromHardwareIds {
     return $null
 }
 
+# ------------------------------------------------------ config wiring
+
+# The app owns %USERPROFILE%\.gif-tool-config.json. This merges one key so the
+# other two survive; a corrupted file is replaced rather than allowed to abort
+# setup at the last step.
+function Merge-ToolConfig {
+    param([string]$ExistingJson, [Parameter(Mandatory)][string]$IdfPath)
+
+    $cfg = $null
+    if (-not [string]::IsNullOrWhiteSpace($ExistingJson)) {
+        try { $cfg = $ExistingJson | ConvertFrom-Json } catch { $cfg = $null }
+    }
+    if (-not $cfg) {
+        $cfg = [pscustomobject]@{ project_path = $null; idf_path = $null; last_serial_port = $null }
+    }
+
+    $cfg.idf_path = $IdfPath
+    return ($cfg | ConvertTo-Json -Depth 4)
+}
+
 # Dot-sourcing (how the tests load this file) leaves InvocationName as '.';
 # running it as a script sets it to the script path. The tests need the
 # functions without the main body firing.
