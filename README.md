@@ -22,11 +22,25 @@ npm run dev
 
 First launch: paste or browse to your EmotionDisplay project root — the folder containing `sdkconfig.defaults` and `main/`. Everything else loads automatically.
 
-**Prerequisite:** ESP-IDF **v5.5.2** must be installed at `~/esp/esp-idf-v5.5.2`. The app does not install it. To set it up:
+**Prerequisite:** ESP-IDF **v5.5.2**. The app does not install it. One script per platform does.
+
+macOS — installs to `~/esp/esp-idf-v5.5.2`:
 
 ```bash
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Axonex-Intelligence-Limited/gif-replacer-tool/main/scripts/setup-macos.sh)"
 ```
+
+Windows — downloads Espressif's offline 5.5.2 installer, runs it silently, and points the app at
+the result. Needs no administrator rights:
+
+```powershell
+Invoke-WebRequest -Uri https://raw.githubusercontent.com/Axonex-Intelligence-Limited/gif-replacer-tool/main/scripts/setup-windows.ps1 -OutFile setup-windows.ps1
+Unblock-File .\setup-windows.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\setup-windows.ps1
+```
+
+The Windows script has not been run on a Windows machine yet. See
+`scripts/setup-windows-laptop-checklist.md` for what still needs verifying.
 
 ## Source layout
 
@@ -43,21 +57,27 @@ src/
 
 ## Tests
 
-23 unit tests across `profile`, `parser`, `builder` and `config`.
+59 Rust unit tests — `builder` 25, `profile` 14, `gifconv` 12, `parser` 6, `config` 2 — plus 39
+Pester tests for the Windows setup script. The suite is machine-independent; it uses synthetic
+fixtures in the temp directory rather than any hardcoded checkout.
 
 ```bash
 cd src-tauri && cargo test
+pwsh -NoProfile -Command 'Invoke-Pester -Path ./scripts/tests'
 ```
 
-Note: `test_profile_detection` hardcodes an absolute path to the original developer's checkout and will fail elsewhere until that path is changed.
+The Pester tests skip the parts that need Windows. CI runs both suites on `windows-latest`.
 
 ## Known limitations
 
-- `tauri.conf.json` has `bundle.active` set to `false`, so `npm run build` produces a release binary but **not** a `.app` bundle. Set `bundle.active` to `true` and supply icons to package a distributable.
-- The `idf_path` key in the config file is not read by anything; ESP-IDF is resolved from `~/esp/esp-idf-v5.5.2` or `$IDF_PATH`.
+- `tauri.conf.json` bundles **NSIS only**. On Windows, `npm run tauri build` produces both the bare
+  `target/release/GIF Replacer Tool.exe` and an installer under `target/release/bundle/nsis/`. A
+  macOS `.app` bundle is **not** configured.
+- `scripts/setup-windows.ps1` has never been executed on Windows. Its pure logic is unit-tested;
+  the platform interaction is not. See `scripts/setup-windows-laptop-checklist.md`.
 
 See the developer manual for the full list.
 
 ## Repository
 
-https://github.com/Axonex-Intelligence-Limited/gif-replacer-tool (private)
+https://github.com/Axonex-Intelligence-Limited/gif-replacer-tool (public)
