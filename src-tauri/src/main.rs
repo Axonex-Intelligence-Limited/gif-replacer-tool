@@ -158,7 +158,8 @@ fn validate_gif_file(file_path: String) -> Result<GifProbeResponse, String> {
 struct BudgetResponse {
     incoming_bytes: u64,
     current_bytes: u64,
-    headroom_bytes: Option<u64>,
+    /// Negative when the newest build artifact already exceeds the partition.
+    headroom_bytes: Option<i64>,
     delta_bytes: i64,
     overflows: bool,
 }

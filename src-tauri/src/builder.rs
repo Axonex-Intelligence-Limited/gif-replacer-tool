@@ -110,7 +110,9 @@ pub const APP_PARTITION_BYTES: u64 = 0x500000;
 pub struct BudgetCheck {
     pub incoming_bytes: u64,
     pub current_bytes: u64,
-    pub headroom_bytes: Option<u64>,
+    /// Free space per the newest build. Negative means that build overflowed
+    /// the partition and its artifact is not a usable baseline.
+    pub headroom_bytes: Option<i64>,
     pub delta_bytes: i64,
     pub overflows: bool,
 }
@@ -128,7 +130,12 @@ fn read_current_size(c_file: &std::path::Path) -> Option<u64> {
 /// .bin is the app image.
 ///
 /// Returns None when the project has never been built.
-fn measure_headroom(project: &std::path::Path) -> Option<u64> {
+///
+/// **The result can be negative.** ESP-IDF writes the .bin before it checks
+/// whether it fits, so a build that failed on partition size leaves an
+/// oversized binary behind. Clamping that to zero would report "no room free"
+/// when the truth is "the last build was already N bytes over".
+fn measure_headroom(project: &std::path::Path) -> Option<i64> {
     let entries = fs::read_dir(project.join("build")).ok()?;
 
     let app_size = entries
@@ -143,7 +150,7 @@ fn measure_headroom(project: &std::path::Path) -> Option<u64> {
         .map(|m| m.len())
         .max()?;
 
-    Some(APP_PARTITION_BYTES.saturating_sub(app_size))
+    Some(APP_PARTITION_BYTES as i64 - app_size as i64)
 }
 
 /// Warns when replacing a slot with a much larger GIF would overflow the app
@@ -164,7 +171,7 @@ pub fn check_flash_budget(
     // exceeds it. An unbuilt project reports overflows=false and lets the
     // frontend say the headroom is unknown.
     let overflows = match headroom_bytes {
-        Some(h) => delta_bytes > h as i64,
+        Some(h) => delta_bytes > h,
         None => false,
     };
 
@@ -348,7 +355,47 @@ mod tests {
         fs::write(build.join("lvgl_porting.bin"), vec![0u8; 4_595_472]).unwrap();
 
         let headroom = measure_headroom(&dir).unwrap();
-        assert_eq!(headroom, APP_PARTITION_BYTES - 4_595_472);
+        assert_eq!(headroom, APP_PARTITION_BYTES as i64 - 4_595_472);
+    }
+
+    #[test]
+    fn test_measure_headroom_reports_over_budget_as_negative() {
+        let dir = std::env::temp_dir().join(format!("gif_tool_over_{}", std::process::id()));
+        let build = dir.join("build");
+        fs::create_dir_all(&build).unwrap();
+        // A build that failed the partition check still leaves its .bin behind.
+        let oversize = APP_PARTITION_BYTES + 1_000;
+        fs::write(build.join("lvgl_porting.bin"), vec![0u8; oversize as usize]).unwrap();
+
+        assert_eq!(
+            measure_headroom(&dir).unwrap(),
+            -1_000,
+            "an oversized artifact must report negative headroom, not clamp to 0"
+        );
+    }
+
+    #[test]
+    fn test_over_budget_baseline_forces_overflow() {
+        let dir = std::env::temp_dir().join(format!("gif_tool_overflag_{}", std::process::id()));
+        let build = dir.join("build");
+        fs::create_dir_all(&build).unwrap();
+        fs::write(
+            build.join("lvgl_porting.bin"),
+            vec![0u8; (APP_PARTITION_BYTES + 500_000) as usize],
+        )
+        .unwrap();
+
+        let profile = ProfileInfo {
+            profile: "test".to_string(),
+            emotions: vec!["cool".to_string()],
+            symbols: vec!["cool".to_string()],
+            profile_path: dir.clone(),
+        };
+
+        // Even a tiny incoming file overflows once the baseline is over budget.
+        let check = check_flash_budget(dir.to_str().unwrap(), &profile, "cool", 1).unwrap();
+        assert!(check.headroom_bytes.unwrap() < 0);
+        assert!(check.overflows);
     }
 
     #[test]
