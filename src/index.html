@@ -14,16 +14,9 @@
     </header>
 
     <main>
-        <!-- Step 1: LVGL Converter -->
+        <!-- Step 1: Project Path -->
         <div class="card">
-            <h2>1. Convert GIF to .c File</h2>
-            <p class="hint">Use LVGL Image Converter to generate a .c file from your GIF</p>
-            <button id="open-converter-btn" class="secondary-btn">🔗 Open LVGL Image Converter</button>
-        </div>
-
-        <!-- Step 2: Project Path -->
-        <div class="card">
-            <h2>2. Set EmotionDisplay Project Path</h2>
+            <h2>1. Set EmotionDisplay Project Path</h2>
             <div class="input-with-button">
                 <input type="text" id="project-path-input" placeholder="/path/to/EmotionDisplay" />
                 <button id="browse-project-btn" class="secondary-btn">📁 Browse</button>
@@ -40,13 +33,13 @@
             <p id="profile-name" class="hint">No profile loaded</p>
         </div>
 
-        <!-- Step 3: Drop Zone -->
+        <!-- Step 2: Drop Zone -->
         <div class="card">
-            <h2>3. Drop Your .c File</h2>
+            <h2>2. Drop Your .gif File</h2>
             <div id="drop-area" class="drop-area">
                 <div id="drop-placeholder">
-                    <p>📁 Drag & drop your .c file here</p>
-                    <p class="hint">Or click to browse</p>
+                    <p>📁 Drag & drop your .gif file here</p>
+                    <p class="hint">Or click to browse — a pre-made .c file also works</p>
                 </div>
                 <div id="file-info" style="display: none;">
                     <p><strong>File:</strong> <span id="file-name"></span></p>
@@ -58,7 +51,7 @@
 
         <!-- Emotion Selector -->
         <div class="card">
-            <h2>4. Select Target Emotion</h2>
+            <h2>3. Select Target Emotion</h2>
             <div id="emotions-container">
                 <p class="hint">Loading emotions...</p>
             </div>
@@ -79,7 +72,7 @@
 
         <!-- Serial Port -->
         <div class="card">
-            <h2>5. Serial Port</h2>
+            <h2>4. Serial Port</h2>
             <div class="input-with-button">
                 <select id="serial-port-select" class="profile-select">
                     <option value="">Select a port...</option>
