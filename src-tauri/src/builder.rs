@@ -58,7 +58,10 @@ pub struct BuildResult {
 ///
 /// Pure, so the rule is testable on every platform; only the Windows arm of
 /// `idf_command` enforces it. Unix runs `sh -c` directly with no intermediate
-/// file.
+/// file, so outside `cfg(test)` the function is unreachable there — hence the
+/// `allow`, which keeps the tests running everywhere instead of `cfg`-gating
+/// them onto Windows.
+#[cfg_attr(not(windows), allow(dead_code))]
 fn bat_unsafe_char(path: &str) -> Option<char> {
     path.chars()
         .find(|c| !c.is_ascii() || matches!(c, '%' | '!' | '&' | '^' | '<' | '>' | '|'))
