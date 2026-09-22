@@ -93,3 +93,30 @@ Describe 'Find-IdfPath' {
             Should -BeNullOrEmpty
     }
 }
+
+Describe 'Test-DownloadIntegrity' {
+    It 'accepts an exact match' {
+        Test-DownloadIntegrity -Expected 1577539256 -Actual 1577539256 | Should -BeTrue
+    }
+
+    It 'rejects a truncated download' {
+        # The realistic failure: connection dropped part-way.
+        Test-DownloadIntegrity -Expected 1577539256 -Actual 900000000 | Should -BeFalse
+    }
+
+    It 'rejects an oversized file' {
+        Test-DownloadIntegrity -Expected 1577539256 -Actual 1577539257 | Should -BeFalse
+    }
+
+    It 'rejects an unknown expected length rather than trusting it' {
+        # Without a Content-Length there is nothing to verify, so treating 0 as
+        # "matches anything" would skip the check exactly when it matters.
+        Test-DownloadIntegrity -Expected 0 -Actual 1577539256 | Should -BeFalse
+    }
+}
+
+Describe 'Get-PartialPath' {
+    It 'appends .part so a failed download never occupies the final path' {
+        Get-PartialPath -Target 'C:\Temp\idf-setup.exe' | Should -Be 'C:\Temp\idf-setup.exe.part'
+    }
+}

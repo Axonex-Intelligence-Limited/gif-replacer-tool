@@ -146,6 +146,22 @@ function Find-IdfPath {
     return $null
 }
 
+# ------------------------------------------------------ download (pure)
+
+function Get-PartialPath {
+    param([Parameter(Mandatory)][string]$Target)
+    return "$Target.part"
+}
+
+# An unknown expected length is a failure, not a pass. Downloading 1.58 GB and
+# installing from a truncated file produces a broken ESP-IDF that reports
+# success — the one outcome this check exists to prevent.
+function Test-DownloadIntegrity {
+    param([long]$Expected, [long]$Actual)
+    if ($Expected -le 0) { return $false }
+    return ($Expected -eq $Actual)
+}
+
 # Dot-sourcing (how the tests load this file) leaves InvocationName as '.';
 # running it as a script sets it to the script path. The tests need the
 # functions without the main body firing.
