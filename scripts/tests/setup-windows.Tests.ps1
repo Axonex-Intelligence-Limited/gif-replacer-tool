@@ -120,3 +120,61 @@ Describe 'Get-PartialPath' {
         Get-PartialPath -Target 'C:\Temp\idf-setup.exe' | Should -Be 'C:\Temp\idf-setup.exe.part'
     }
 }
+
+Describe 'Get-InstallerArgs' {
+    It 'includes every flag the silent path needs' {
+        $a = Get-InstallerArgs -IdfDir 'C:\Espressif' -LogPath 'C:\Temp\idf.log'
+        $a | Should -Contain '/VERYSILENT'
+        $a | Should -Contain '/SUPPRESSMSGBOXES'
+        $a | Should -Contain '/SP-'
+        $a | Should -Contain '/NOCANCEL'
+        $a | Should -Contain '/USEEMBEDDEDPYTHON=yes'
+        $a | Should -Contain '/SKIPSYSTEMCHECK=yes'
+    }
+
+    It 'passes the install directory and log path through' {
+        $a = Get-InstallerArgs -IdfDir 'D:\idf' -LogPath 'C:\Temp\idf.log'
+        $a | Should -Contain '/IDFDIR=D:\idf'
+        $a | Should -Contain '/LOG=C:\Temp\idf.log'
+    }
+
+    It 'does not pass /IDFVERSION, which cannot help a version-specific installer' {
+        # The offline installer IS the 5.5.2 build. /IDFVERSION drives the
+        # legacy installer's dropdown, which reads idf_versions.txt — a list
+        # that does not contain 5.5.2.
+        (Get-InstallerArgs -IdfDir 'C:\Espressif' -LogPath 'x') -join ' ' |
+            Should -Not -BeLike '*/IDFVERSION*'
+    }
+}
+
+Describe 'Wait-ProcessGone' {
+    It 'returns true immediately when no such process exists' {
+        (Wait-ProcessGone -Name 'definitely-not-a-real-process-xyz' -TimeoutSeconds 5 -PollSeconds 1) |
+            Should -BeTrue
+    }
+
+    It 'returns false when the process outlives the timeout' {
+        $p = Start-Process -FilePath 'sleep' -ArgumentList '30' -PassThru -ErrorAction SilentlyContinue
+        if (-not $p) { Set-ItResult -Skipped -Because 'sleep unavailable'; return }
+
+        try {
+            (Wait-ProcessGone -Name 'sleep' -TimeoutSeconds 2 -PollSeconds 1) | Should -BeFalse
+        } finally {
+            Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+Describe 'Get-InstallerLogVerdict' {
+    It 'reads success from the log the installer writes' {
+        Get-InstallerLogVerdict -LogText 'Installation completed successfully' | Should -Be 'Ok'
+    }
+
+    It 'reads failure from the log' {
+        Get-InstallerLogVerdict -LogText 'Installation failed: disk full' | Should -Be 'Failed'
+    }
+
+    It 'treats an empty log as failed, not as success' {
+        Get-InstallerLogVerdict -LogText '' | Should -Be 'Failed'
+    }
+}

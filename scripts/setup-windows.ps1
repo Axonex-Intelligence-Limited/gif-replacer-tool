@@ -162,6 +162,61 @@ function Test-DownloadIntegrity {
     return ($Expected -eq $Actual)
 }
 
+# ------------------------------------------------------ silent install
+
+function Get-InstallerArgs {
+    param([Parameter(Mandatory)][string]$IdfDir, [Parameter(Mandatory)][string]$LogPath)
+
+    # /USEEMBEDDEDPYTHON=yes is the default, but stated explicitly: it is what
+    # removes Python from the prerequisites, and a silent run gives no
+    # opportunity to notice the default changing.
+    # /IDFVERSION is deliberately absent: the offline installer is already the
+    # 5.5.2 build, and the flag drives a dropdown fed by idf_versions.txt,
+    # which does not list 5.5.2.
+    return @(
+        '/VERYSILENT'
+        '/SUPPRESSMSGBOXES'
+        '/SP-'
+        '/NOCANCEL'
+        '/USEEMBEDDEDPYTHON=yes'
+        '/SKIPSYSTEMCHECK=yes'
+        "/IDFDIR=$IdfDir"
+        "/LOG=$LogPath"
+    )
+}
+
+function Wait-ProcessGone {
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [int]$TimeoutSeconds = 3600,
+        [int]$PollSeconds = 5
+    )
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        if (-not (Get-Process -Name $Name -ErrorAction SilentlyContinue)) { return $true }
+        Start-Sleep -Seconds $PollSeconds
+    }
+    return $false
+}
+
+# The installer's exit code is unreliable once it has re-launched itself, so the
+# log is the authority. An empty log means it never got far enough to write one,
+# which is a failure — treating it as success would verify a tree that is not
+# there.
+#
+# Failure markers are checked FIRST, so an ambiguous log errs toward reporting a
+# problem rather than proceeding. That is the deliberate direction: a false
+# FAIL costs a re-run, a false PASS would flash a half-installed toolchain.
+function Get-InstallerLogVerdict {
+    param([string]$LogText)
+
+    if ([string]::IsNullOrWhiteSpace($LogText)) { return 'Failed' }
+    if ($LogText -match 'failed|error')      { return 'Failed' }
+    if ($LogText -match 'completed successfully|Installation completed|success') { return 'Ok' }
+    return 'Failed'
+}
+
 # Dot-sourcing (how the tests load this file) leaves InvocationName as '.';
 # running it as a script sets it to the script path. The tests need the
 # functions without the main body firing.
