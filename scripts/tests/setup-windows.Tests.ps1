@@ -29,18 +29,18 @@ Describe 'contract helpers' {
 
 Describe 'Get-IdfCandidates' {
     It 'puts the configured path first' {
-        $c = Get-IdfCandidates -Configured 'D:\my-idf' -Environment @{} -Profile 'C:\Users\dev'
+        $c = Get-IdfCandidates -Configured 'D:\my-idf' -Environment @{} -UserProfile 'C:\Users\dev'
         $c[0] | Should -Be 'D:\my-idf'
     }
 
     It 'uses IDF_TOOLS_PATH from the environment when set' {
         $c = Get-IdfCandidates -Configured '' `
-            -Environment @{ IDF_TOOLS_PATH = 'D:\tools' } -Profile 'C:\Users\dev'
+            -Environment @{ IDF_TOOLS_PATH = 'D:\tools' } -UserProfile 'C:\Users\dev'
         $c | Should -Contain 'D:\tools\frameworks\esp-idf-v5.5.2'
     }
 
     It 'uses the installer default layout' {
-        $c = Get-IdfCandidates -Configured '' -Environment @{} -Profile 'C:\Users\dev'
+        $c = Get-IdfCandidates -Configured '' -Environment @{} -UserProfile 'C:\Users\dev'
         $c | Should -Contain 'C:\Espressif\frameworks\esp-idf-v5.5.2'
         $c | Should -Contain 'C:\Users\dev\esp\esp-idf-v5.5.2'
         $c | Should -Contain 'C:\esp\esp-idf-v5.5.2'
@@ -49,7 +49,7 @@ Describe 'Get-IdfCandidates' {
     It 'never returns an empty list' {
         # If this is empty the "not found" message has nothing to name, and the
         # script reports a failure with no explanation of where it looked.
-        (Get-IdfCandidates -Configured '' -Environment @{} -Profile 'C:\Users\dev').Count |
+        (Get-IdfCandidates -Configured '' -Environment @{} -UserProfile 'C:\Users\dev').Count |
             Should -BeGreaterThan 0
     }
 }
@@ -246,5 +246,14 @@ Describe 'Merge-ToolConfig' {
     It 'round-trips a path containing backslashes' {
         $o = (Merge-ToolConfig -ExistingJson '' -IdfPath 'C:\a\b\esp-idf-v5.5.2') | ConvertFrom-Json
         $o.idf_path | Should -Be 'C:\a\b\esp-idf-v5.5.2'
+    }
+}
+
+Describe 'script shape' {
+    It 'does not run Main when dot-sourced' {
+        # If the guard breaks, every Pester run would kick off a 1.58 GB
+        # download instead of running the suite.
+        . (Join-Path $PSScriptRoot '..' 'setup-windows.ps1')
+        Get-Command Main -ErrorAction SilentlyContinue | Should -Not -BeNullOrEmpty
     }
 }
