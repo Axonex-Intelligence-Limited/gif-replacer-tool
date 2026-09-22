@@ -1,10 +1,12 @@
 // builder.rs - File replacement, build, and flash execution
 
 use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::SystemTime;
 use regex::Regex;
 use serde::Serialize;
+use crate::config;
 use crate::profile::ProfileInfo;
 
 /// Errors that can occur during build/flash operations
@@ -86,22 +88,149 @@ pub fn replace_gif_file(
     Ok(())
 }
 
-/// Resolves the ESP-IDF install to use for build/flash. The firmware requires
-/// ESP-IDF **v5.5.2** — v6.2 reshapes the LCD panel struct and breaks the
-/// build — so prefer the known-good checkout at `~/esp/esp-idf-v5.5.2` and only
-/// fall back to `$IDF_PATH` when that's absent.
-fn resolve_idf_path() -> Result<String, BuilderError> {
-    if let Ok(home) = std::env::var("HOME") {
-        let known = format!("{}/esp/esp-idf-v5.5.2", home);
-        if std::path::Path::new(&known).join("export.sh").exists() {
-            return Ok(known);
+/// The file that proves a directory is a real IDF checkout.
+fn idf_marker() -> &'static str {
+    if cfg!(windows) { "export.bat" } else { "export.sh" }
+}
+
+/// Where to look for ESP-IDF v5.5.2, most likely first.
+///
+/// `configured` leads on purpose: on Windows the checkout is somewhere none of
+/// the probes may know about, and the tool's own setting is the escape hatch.
+fn idf_candidates(configured: Option<&str>) -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> = configured.map(PathBuf::from).into_iter().collect();
+
+    #[cfg(windows)]
+    {
+        // IDF_TOOLS_PATH, if the user's shell has it, points straight at the
+        // framework: <root>\frameworks\esp-idf-v5.5.2.
+        if let Ok(tools) = std::env::var("IDF_TOOLS_PATH") {
+            v.push(PathBuf::from(&tools).join("frameworks").join("esp-idf-v5.5.2"));
+        }
+        // The official installer's defaults: framework under \frameworks\,
+        // toolchains and python env at the root itself.
+        v.push(PathBuf::from(r"C:\Espressif\frameworks\esp-idf-v5.5.2"));
+        if let Ok(profile) = std::env::var("USERPROFILE") {
+            v.push(PathBuf::from(profile).join("esp").join("esp-idf-v5.5.2"));
+        }
+        v.push(PathBuf::from(r"C:\esp\esp-idf-v5.5.2"));
+    }
+    #[cfg(not(windows))]
+    {
+        if let Ok(home) = std::env::var("HOME") {
+            v.push(PathBuf::from(home).join("esp").join("esp-idf-v5.5.2"));
         }
     }
-    std::env::var("IDF_PATH").map_err(|_| {
-        BuilderError::IdfNotFound(
-            "ESP-IDF v5.5.2 not found. Install it at ~/esp/esp-idf-v5.5.2 or set $IDF_PATH.".to_string(),
-        )
-    })
+
+    v
+}
+
+/// The IDF_TOOLS_PATH a checkout needs, derived from where it sits.
+///
+/// On Windows the tools are NOT next to the framework. `export.bat` resolves
+/// toolchains and the python env under IDF_TOOLS_PATH and falls back to
+/// `%USERPROFILE%\.espressif` when it is unset — where an installer-provided
+/// checkout's tools are not. The export then "succeeds" with no toolchain on
+/// PATH, and the build dies with a bare `'idf.py' is not recognized`, which
+/// says nothing about the real cause. The installer sets this only inside its
+/// "ESP-IDF CMD/PowerShell" shortcuts; the app inherits no such thing.
+#[cfg(windows)]
+fn idf_tools_path_for(idf_path: &Path) -> Option<PathBuf> {
+    let frameworks = idf_path.parent()?;                    // <root>\frameworks
+    if frameworks.file_name()?.to_ascii_lowercase() != "frameworks" {
+        return None;
+    }
+    frameworks.parent().map(Path::to_path_buf)              // <root>
+}
+
+/// Sibling checkouts that exist but are the wrong version. Worth naming:
+/// "not found" reads as "you never installed it" when the real answer is
+/// usually "you installed v6.2".
+fn other_versions(candidates: &[PathBuf]) -> Vec<String> {
+    let mut found = Vec::new();
+    for c in candidates {
+        let Some(parent) = c.parent() else { continue };
+        let Ok(entries) = fs::read_dir(parent) else { continue };
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            if name.starts_with("esp-idf-v") {
+                found.push(e.path().to_string_lossy().to_string());
+            }
+        }
+    }
+    found.sort();
+    found.dedup();
+    found
+}
+
+/// The "not found" error. Pure, so the wording is testable without a real
+/// ESP-IDF install or a mutated environment.
+fn idf_not_found_message(candidates: &[PathBuf]) -> String {
+    let mut msg = String::from("ESP-IDF v5.5.2 not found.\n\nLooked in:");
+    for c in candidates {
+        msg.push_str(&format!("\n  {}", c.display()));
+    }
+    msg.push_str(
+        "\n\nThis project needs 5.5.2 — v6.x reshapes the LCD panel struct and does not build.",
+    );
+
+    let others = other_versions(candidates);
+    if !others.is_empty() {
+        msg.push_str("\nAlso present, wrong version:");
+        for o in others {
+            msg.push_str(&format!("\n  {}", o));
+        }
+    }
+
+    if cfg!(windows) {
+        msg.push_str("\n\nInstall 5.5.2, or set \"idf_path\" in %USERPROFILE%\\.gif-tool-config.json.");
+    } else {
+        msg.push_str("\n\nInstall 5.5.2, or set \"idf_path\" in ~/.gif-tool-config.json.");
+    }
+
+    msg
+}
+
+/// Resolves the ESP-IDF install to use for build/flash. The firmware requires
+/// ESP-IDF **v5.5.2** — v6.2 reshapes the LCD panel struct and breaks the
+/// build — so prefer the known-good checkouts and only fall back to `$IDF_PATH`.
+///
+/// `configured` is the tool's own `idf_path` setting, tried first. Taking it as
+/// a parameter rather than reading the config here keeps this function pure and
+/// its behaviour testable; the callers do the I/O.
+fn resolve_idf_path(configured: Option<&str>) -> Result<String, BuilderError> {
+    let candidates = idf_candidates(configured);
+
+    for c in &candidates {
+        if c.join(idf_marker()).exists() {
+            return Ok(c.to_string_lossy().to_string());
+        }
+    }
+
+    if let Ok(idf) = std::env::var("IDF_PATH") {
+        if !idf.is_empty() {
+            return Ok(idf);
+        }
+    }
+
+    Err(BuilderError::IdfNotFound(idf_not_found_message(&candidates)))
+}
+
+/// The ESP-IDF tools root for the checkout the build path would use, if any.
+///
+/// Conversion uses it to find the IDF python env (spec §1d). IDF being absent
+/// is not a conversion failure, so this returns `Option` rather than `Result`.
+#[cfg(windows)]
+pub fn resolved_idf_tools_path() -> Option<PathBuf> {
+    let configured = config::load_config().idf_path;
+    let idf = resolve_idf_path(configured.as_deref()).ok()?;
+    idf_tools_path_for(Path::new(&idf))
+}
+
+/// Unix has no separate tools root — `export.sh` finds its own.
+#[cfg(not(windows))]
+pub fn resolved_idf_tools_path() -> Option<PathBuf> {
+    None
 }
 
 /// App partition size from EmotionDisplay/partitions.csv:
@@ -270,7 +399,7 @@ pub fn check_flash_budget(
 /// * `Ok(BuildResult)` - Build completed (check success field)
 /// * `Err(BuilderError)` - Command execution failed
 pub fn run_build_sync(project_path: &str) -> Result<BuildResult, BuilderError> {
-    let idf_path = resolve_idf_path()?;
+    let idf_path = resolve_idf_path(config::load_config().idf_path.as_deref())?;
 
     // Run build command. Unset inherited IDF env vars first: a stale
     // IDF_PYTHON_ENV_PATH from a prior v6.2 activation would otherwise make
@@ -306,7 +435,7 @@ pub fn run_build_sync(project_path: &str) -> Result<BuildResult, BuilderError> {
 /// * `Ok(BuildResult)` - Flash completed (check success field)
 /// * `Err(BuilderError)` - Command execution failed
 pub fn run_flash_sync(project_path: &str, serial_port: &str) -> Result<BuildResult, BuilderError> {
-    let idf_path = resolve_idf_path()?;
+    let idf_path = resolve_idf_path(config::load_config().idf_path.as_deref())?;
 
     // Verify serial port exists
     if !std::path::Path::new(serial_port).exists() {
@@ -523,5 +652,87 @@ mod tests {
             Headroom::Known(h) => assert_eq!(h, 3_000),
             other => panic!("expected Known, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_idf_candidates_put_configured_first() {
+        let candidates = idf_candidates(Some("/opt/my-idf"));
+        assert_eq!(candidates[0], PathBuf::from("/opt/my-idf"));
+    }
+
+    #[test]
+    fn test_idf_candidates_never_empty_without_configured() {
+        assert!(!idf_candidates(None).is_empty());
+    }
+
+    #[test]
+    fn test_resolve_idf_path_accepts_a_checkout_with_the_marker() {
+        let dir = std::env::temp_dir().join(format!("gif_tool_idf_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(idf_marker()), b"# stub").unwrap();
+
+        let resolved = resolve_idf_path(Some(dir.to_str().unwrap())).unwrap();
+        assert_eq!(resolved, dir.to_str().unwrap());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_idf_not_found_message_names_every_candidate() {
+        let msg = idf_not_found_message(&[
+            PathBuf::from("/a/esp-idf-v5.5.2"),
+            PathBuf::from("/b/esp-idf-v5.5.2"),
+        ]);
+        assert!(msg.contains("/a/esp-idf-v5.5.2"));
+        assert!(msg.contains("/b/esp-idf-v5.5.2"));
+        assert!(msg.contains("5.5.2"));
+    }
+
+    #[test]
+    fn test_idf_not_found_message_names_the_config_escape_hatch() {
+        let msg = idf_not_found_message(&[]);
+        assert!(msg.contains("gif-tool-config.json"));
+        assert!(msg.contains("idf_path"));
+    }
+
+    #[test]
+    fn test_other_versions_finds_siblings() {
+        let root = std::env::temp_dir().join(format!("gif_tool_vers_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let frameworks = root.join("frameworks");
+        fs::create_dir_all(frameworks.join("esp-idf-v6.2")).unwrap();
+        fs::create_dir_all(frameworks.join("esp-idf-v5.5.2")).unwrap();
+
+        let found = other_versions(&[frameworks.join("esp-idf-v5.5.2")]);
+
+        assert!(
+            found.iter().any(|p| p.contains("esp-idf-v6.2")),
+            "a sibling checkout of the wrong version must be named: {:?}",
+            found
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_idf_candidates_include_the_windows_installer_layout() {
+        let candidates = idf_candidates(None);
+        assert!(candidates.contains(&PathBuf::from(r"C:\Espressif\frameworks\esp-idf-v5.5.2")));
+        assert!(candidates.contains(&PathBuf::from(r"C:\esp\esp-idf-v5.5.2")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_idf_tools_path_from_installer_layout() {
+        let idf = Path::new(r"C:\Espressif\frameworks\esp-idf-v5.5.2");
+        assert_eq!(idf_tools_path_for(idf), Some(PathBuf::from(r"C:\Espressif")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_idf_tools_path_none_when_not_under_frameworks() {
+        assert_eq!(idf_tools_path_for(Path::new(r"D:\idf\esp-idf-v5.5.2")), None);
     }
 }
