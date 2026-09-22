@@ -252,4 +252,40 @@ mod tests {
         std::fs::write(dir.join("tools").join("gif2c.py"), b"# stub").unwrap();
         assert_eq!(find_gif2c(&dir).unwrap(), dir.join("tools").join("gif2c.py"));
     }
+
+    /// Integration check against a real EmotionDisplay checkout. Ignored by
+    /// default: it needs the sibling repo, writes into it, and depends on
+    /// python3. This is the only coverage of the subprocess path.
+    ///
+    ///     EMOTIONDISPLAY_PATH=/path/to/EmotionDisplay \
+    ///       cargo test run_gif2c_against_real_project -- --ignored --nocapture
+    ///
+    /// It OVERWRITES <profile>/gif/angry.c. Restore it afterwards with:
+    ///     git -C $EMOTIONDISPLAY_PATH checkout main/<profile>/gif/angry.c
+    #[test]
+    #[ignore]
+    fn run_gif2c_against_real_project() {
+        let project = std::path::PathBuf::from(
+            std::env::var("EMOTIONDISPLAY_PATH")
+                .expect("set EMOTIONDISPLAY_PATH to an EmotionDisplay checkout"),
+        );
+
+        let profile = crate::profile::detect_active_profile(project.to_str().unwrap()).unwrap();
+
+        let gif = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("gif")
+            .join("angry_800x480.gif");
+        assert!(gif.is_file(), "fixture missing at {}", gif.display());
+
+        let result = run_gif2c_sync(&project, &profile, &gif, "angry").unwrap();
+        println!("--- gif2c.py output ---\n{}", result.output);
+
+        assert!(result.output.contains("MISSING -> promoted"), "GCT repair did not run");
+        assert!(result.output.contains("self-check"), "self-check did not run");
+
+        let written = profile.profile_path.join("gif").join("angry.c");
+        assert!(written.is_file(), "no .c written to {}", written.display());
+    }
 }
