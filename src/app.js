@@ -569,16 +569,19 @@ async function initApp() {
 
             if (budget && budget.overflows) {
                 const kb = (n) => Math.round(n / 1024);
+                const h = budget.headroom;
                 let headroom;
-                if (budget.headroom_bytes === null) {
+                if (h.state === 'NeverBuilt') {
                     headroom = 'an unknown amount (this project has not been built yet)';
-                } else if (budget.headroom_bytes < 0) {
-                    // The last build failed on partition size. Its .bin is
-                    // still in build/, so it is not a usable baseline.
-                    headroom = `${kb(-budget.headroom_bytes)} KB OVER the partition ` +
+                } else if (h.state === 'Stale') {
+                    headroom = 'an unknown amount (the last build predates your latest changes)';
+                } else if (h.bytes < 0) {
+                    // The last build failed on partition size but still left
+                    // its .bin behind, so it is not a usable baseline.
+                    headroom = `${kb(-h.bytes)} KB OVER the partition ` +
                                `(the last build did not fit)`;
                 } else {
-                    headroom = `~${kb(budget.headroom_bytes)} KB`;
+                    headroom = `~${kb(h.bytes)} KB`;
                 }
                 const sign = budget.delta_bytes >= 0 ? '+' : '';
 

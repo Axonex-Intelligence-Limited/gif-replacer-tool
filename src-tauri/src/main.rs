@@ -158,8 +158,9 @@ fn validate_gif_file(file_path: String) -> Result<GifProbeResponse, String> {
 struct BudgetResponse {
     incoming_bytes: u64,
     current_bytes: u64,
-    /// Negative when the newest build artifact already exceeds the partition.
-    headroom_bytes: Option<i64>,
+    /// Either a trustworthy free-byte count, or why we cannot state one.
+    /// Serialises as {"state":"Known","bytes":N} / {"state":"Stale"} / {"state":"NeverBuilt"}.
+    headroom: builder::Headroom,
     delta_bytes: i64,
     overflows: bool,
 }
@@ -184,7 +185,7 @@ fn check_flash_budget(
     Ok(BudgetResponse {
         incoming_bytes: check.incoming_bytes,
         current_bytes: check.current_bytes,
-        headroom_bytes: check.headroom_bytes,
+        headroom: check.headroom,
         delta_bytes: check.delta_bytes,
         overflows: check.overflows,
     })

@@ -2,7 +2,9 @@
 
 use std::fs;
 use std::process::Command;
+use std::time::SystemTime;
 use regex::Regex;
+use serde::Serialize;
 use crate::profile::ProfileInfo;
 
 /// Errors that can occur during build/flash operations
@@ -106,13 +108,27 @@ fn resolve_idf_path() -> Result<String, BuilderError> {
 /// `factory, app, factory, 0x10000, 0x500000`.
 pub const APP_PARTITION_BYTES: u64 = 0x500000;
 
+/// How much room is left, and whether the number can be trusted.
+#[derive(Debug, Serialize)]
+#[serde(tag = "state", content = "bytes")]
+pub enum Headroom {
+    /// No build artifact at all — the project has never been built.
+    NeverBuilt,
+    /// The newest artifact is older than the sources it was built from, so its
+    /// size describes a different tree. Reporting it as current is how a stale
+    /// 6 MB binary once got read as "0 KB free" and sent a build to its death.
+    Stale,
+    /// Free bytes per the newest build. Negative means that build overflowed
+    /// the partition — ESP-IDF writes the .bin before checking whether it fits.
+    Known(i64),
+}
+
 #[derive(Debug)]
 pub struct BudgetCheck {
     pub incoming_bytes: u64,
     pub current_bytes: u64,
-    /// Free space per the newest build. Negative means that build overflowed
-    /// the partition and its artifact is not a usable baseline.
-    pub headroom_bytes: Option<i64>,
+    /// Free space per the newest build, or why we cannot state one.
+    pub headroom: Headroom,
     pub delta_bytes: i64,
     pub overflows: bool,
 }
@@ -125,32 +141,93 @@ fn read_current_size(c_file: &std::path::Path) -> Option<u64> {
     re.captures(&text)?.get(1)?.as_str().parse().ok()
 }
 
-/// Measures free space in the app partition from the last build's application
-/// binary. Excludes the bootloader and partition table — the largest remaining
-/// .bin is the app image.
-///
-/// Returns None when the project has never been built.
-///
-/// **The result can be negative.** ESP-IDF writes the .bin before it checks
-/// whether it fits, so a build that failed on partition size leaves an
-/// oversized binary behind. Clamping that to zero would report "no room free"
-/// when the truth is "the last build was already N bytes over".
-fn measure_headroom(project: &std::path::Path) -> Option<i64> {
-    let entries = fs::read_dir(project.join("build")).ok()?;
-
-    let app_size = entries
-        .filter_map(|e| e.ok())
+/// (size, mtime) of the newest application binary in `build/`. Excludes the
+/// bootloader and partition table — the largest remaining .bin is the app image.
+fn newest_app_binary(project: &std::path::Path) -> Option<(u64, SystemTime)> {
+    fs::read_dir(project.join("build"))
+        .ok()?
+        .flatten()
         .filter(|e| {
             let name = e.file_name().to_string_lossy().to_string();
             name.ends_with(".bin")
                 && !name.contains("bootloader")
                 && !name.contains("partition-table")
         })
-        .filter_map(|e| e.metadata().ok())
-        .map(|m| m.len())
-        .max()?;
+        .filter_map(|e| {
+            let md = e.metadata().ok()?;
+            Some((md.len(), md.modified().ok()?))
+        })
+        .max_by_key(|(size, _)| *size)
+}
 
-    Some(APP_PARTITION_BYTES as i64 - app_size as i64)
+/// Newest mtime under `dir`, skipping build output and VCS metadata.
+fn newest_mtime(dir: &std::path::Path, depth: usize) -> Option<SystemTime> {
+    if depth > 6 {
+        return None;
+    }
+
+    let mut newest: Option<SystemTime> = None;
+    for entry in fs::read_dir(dir).ok()?.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name == "build" || name == ".git" {
+            continue;
+        }
+
+        let Ok(md) = entry.metadata() else { continue };
+        let m = if md.is_dir() {
+            newest_mtime(&entry.path(), depth + 1)
+        } else {
+            md.modified().ok()
+        };
+
+        if let Some(m) = m {
+            if newest.map_or(true, |n| m > n) {
+                newest = Some(m);
+            }
+        }
+    }
+    newest
+}
+
+/// Newest mtime among the inputs that actually change the firmware image.
+///
+/// Deliberately a fixed list rather than a whole-tree walk: generated files
+/// such as `dependencies.lock` would otherwise make every build look stale.
+fn newest_source_mtime(project: &std::path::Path) -> Option<SystemTime> {
+    let mut newest: Option<SystemTime> = None;
+
+    for name in ["sdkconfig", "sdkconfig.defaults", "partitions.csv"] {
+        if let Ok(m) = fs::metadata(project.join(name)).and_then(|md| md.modified()) {
+            if newest.map_or(true, |n| m > n) {
+                newest = Some(m);
+            }
+        }
+    }
+
+    if let Some(m) = newest_mtime(&project.join("main"), 0) {
+        if newest.map_or(true, |n| m > n) {
+            newest = Some(m);
+        }
+    }
+
+    newest
+}
+
+/// Free space in the app partition according to the newest build, or the
+/// reason that number cannot be trusted.
+fn measure_headroom(project: &std::path::Path) -> Headroom {
+    let Some((size, bin_mtime)) = newest_app_binary(project) else {
+        return Headroom::NeverBuilt;
+    };
+
+    // A .bin older than the sources describes a previous tree.
+    if let Some(src_mtime) = newest_source_mtime(project) {
+        if bin_mtime < src_mtime {
+            return Headroom::Stale;
+        }
+    }
+
+    Headroom::Known(APP_PARTITION_BYTES as i64 - size as i64)
 }
 
 /// Warns when replacing a slot with a much larger GIF would overflow the app
@@ -165,20 +242,20 @@ pub fn check_flash_budget(
     let c_file = profile.profile_path.join("gif").join(format!("{}.c", emotion));
     let current_bytes = read_current_size(&c_file).unwrap_or(0);
     let delta_bytes = incoming_bytes as i64 - current_bytes as i64;
-    let headroom_bytes = measure_headroom(std::path::Path::new(project_path));
+    let headroom = measure_headroom(std::path::Path::new(project_path));
 
-    // Overflows only when we can actually measure the budget and the delta
-    // exceeds it. An unbuilt project reports overflows=false and lets the
-    // frontend say the headroom is unknown.
-    let overflows = match headroom_bytes {
-        Some(h) => delta_bytes > h,
-        None => false,
+    // Overflows only when we have a trustworthy number and the delta exceeds
+    // it. Never-built and stale baselines report overflows=false; the frontend
+    // says the headroom is unknown rather than inventing one.
+    let overflows = match &headroom {
+        Headroom::Known(h) => delta_bytes > *h,
+        _ => false,
     };
 
     Ok(BudgetCheck {
         incoming_bytes,
         current_bytes,
-        headroom_bytes,
+        headroom,
         delta_bytes,
         overflows,
     })
@@ -354,8 +431,10 @@ mod tests {
         fs::write(build.join("partition-table.bin"), vec![0u8; 100]).unwrap();
         fs::write(build.join("lvgl_porting.bin"), vec![0u8; 4_595_472]).unwrap();
 
-        let headroom = measure_headroom(&dir).unwrap();
-        assert_eq!(headroom, APP_PARTITION_BYTES as i64 - 4_595_472);
+        match measure_headroom(&dir) {
+            Headroom::Known(h) => assert_eq!(h, APP_PARTITION_BYTES as i64 - 4_595_472),
+            other => panic!("expected Known, got {:?}", other),
+        }
     }
 
     #[test]
@@ -367,11 +446,13 @@ mod tests {
         let oversize = APP_PARTITION_BYTES + 1_000;
         fs::write(build.join("lvgl_porting.bin"), vec![0u8; oversize as usize]).unwrap();
 
-        assert_eq!(
-            measure_headroom(&dir).unwrap(),
-            -1_000,
-            "an oversized artifact must report negative headroom, not clamp to 0"
-        );
+        match measure_headroom(&dir) {
+            Headroom::Known(h) => assert_eq!(
+                h, -1_000,
+                "an oversized artifact must report negative headroom, not clamp to 0"
+            ),
+            other => panic!("expected Known, got {:?}", other),
+        }
     }
 
     #[test]
@@ -394,14 +475,53 @@ mod tests {
 
         // Even a tiny incoming file overflows once the baseline is over budget.
         let check = check_flash_budget(dir.to_str().unwrap(), &profile, "cool", 1).unwrap();
-        assert!(check.headroom_bytes.unwrap() < 0);
+        assert!(matches!(check.headroom, Headroom::Known(h) if h < 0));
         assert!(check.overflows);
     }
 
     #[test]
-    fn test_measure_headroom_none_without_build() {
+    fn test_measure_headroom_never_built() {
         let dir = std::env::temp_dir().join(format!("gif_tool_nobuild_{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
-        assert_eq!(measure_headroom(&dir), None);
+        assert!(matches!(measure_headroom(&dir), Headroom::NeverBuilt));
+    }
+
+    #[test]
+    fn test_measure_headroom_stale_when_sources_are_newer() {
+        let dir = std::env::temp_dir().join(format!("gif_tool_stale_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("build")).unwrap();
+        fs::create_dir_all(dir.join("main")).unwrap();
+
+        fs::write(dir.join("build").join("lvgl_porting.bin"), vec![0u8; 100_000]).unwrap();
+        // Touch a source after the artifact, so the build is older than the tree.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(dir.join("main").join("main.cpp"), b"// edited after the build").unwrap();
+
+        assert!(
+            matches!(measure_headroom(&dir), Headroom::Stale),
+            "a .bin older than main/ must not be reported as the current baseline"
+        );
+    }
+
+    #[test]
+    fn test_measure_headroom_known_when_build_is_newest() {
+        let dir = std::env::temp_dir().join(format!("gif_tool_fresh_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("main")).unwrap();
+        fs::write(dir.join("main").join("main.cpp"), b"// source").unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::create_dir_all(dir.join("build")).unwrap();
+        fs::write(
+            dir.join("build").join("lvgl_porting.bin"),
+            vec![0u8; (APP_PARTITION_BYTES - 3_000) as usize],
+        )
+        .unwrap();
+
+        match measure_headroom(&dir) {
+            Headroom::Known(h) => assert_eq!(h, 3_000),
+            other => panic!("expected Known, got {:?}", other),
+        }
     }
 }
