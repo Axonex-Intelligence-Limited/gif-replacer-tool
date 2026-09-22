@@ -1,3 +1,5 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 // Phase 2 - Tauri GUI for GIF Replacer Tool
 
 mod profile;
@@ -369,7 +371,6 @@ async fn browse_folder() -> Option<String> {
         .map(|p| p.to_string_lossy().to_string())
 }
 
-#[cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 fn main() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
