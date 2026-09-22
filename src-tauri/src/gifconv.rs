@@ -18,7 +18,7 @@ pub enum GifConvError {
     NotAGif([u8; 3]),
     WrongSize { found: (u16, u16), expected: (u16, u16) },
     Gif2cMissing(PathBuf),
-    PythonMissing,
+    PythonMissing(Vec<String>),
     ConversionFailed { exit_code: i32, output: String },
 }
 
@@ -55,11 +55,14 @@ impl fmt::Display for GifConvError {
                  or drop a pre-made .c file instead.",
                 path.display()
             ),
-            Self::PythonMissing => write!(
-                f,
-                "python3 not found. Install Apple's developer tools, or drop a \
-                 pre-made .c file instead."
-            ),
+            Self::PythonMissing(tried) => {
+                let mut msg = String::from("No Python interpreter found for gif2c.py.\n\nTried:");
+                for t in tried {
+                    msg.push_str(&format!("\n  {}", t));
+                }
+                msg.push_str("\n\nInstall Python 3, or drop a pre-made .c file instead.");
+                write!(f, "{}", msg)
+            },
             Self::ConversionFailed { exit_code, output } => write!(
                 f,
                 "gif2c.py failed (exit {}):\n{}",
@@ -122,6 +125,62 @@ pub fn find_gif2c(project: &Path) -> Result<PathBuf, GifConvError> {
 ///
 /// gif2c.py writes its output only after its self-check passes, so a rejection
 /// here leaves the existing .c file untouched.
+/// An interpreter plus any leading args it needs — `py -3` is two tokens.
+#[derive(Debug, Clone)]
+pub struct PythonCmd {
+    pub program: String,
+    pub args: Vec<String>,
+}
+
+/// How to name this interpreter in the "Tried:" list.
+fn describe_python(cmd: &PythonCmd) -> String {
+    if cmd.args.is_empty() {
+        cmd.program.clone()
+    } else {
+        format!("{} {}", cmd.program, cmd.args.join(" "))
+    }
+}
+
+/// Interpreters to try for gif2c.py, most likely first.
+///
+/// The IDF venv leads: the build layer already located a usable ESP-IDF, and
+/// its python env lives inside IDF_TOOLS_PATH, so it is the one interpreter we
+/// can be sure exists. `py -3` and `python` follow so conversion still works on
+/// a machine with no ESP-IDF at all — `gif2c.py` is stdlib-only, so any 3.7+
+/// will do.
+#[cfg(windows)]
+fn python_candidates(idf_tools_path: Option<&Path>) -> Vec<PythonCmd> {
+    let mut v = Vec::new();
+
+    if let Some(tools) = idf_tools_path {
+        // <tools>\python_env\idf5.5_py3.11_env\Scripts\python.exe — the env
+        // directory name carries both the IDF and python versions, so match
+        // whatever is there rather than spelling out a name that drifts on the
+        // next minor bump.
+        if let Ok(entries) = std::fs::read_dir(tools.join("python_env")) {
+            for e in entries.flatten() {
+                let exe = e.path().join("Scripts").join("python.exe");
+                if exe.is_file() {
+                    v.push(PythonCmd {
+                        program: exe.to_string_lossy().to_string(),
+                        args: Vec::new(),
+                    });
+                }
+            }
+        }
+    }
+
+    v.push(PythonCmd { program: "py".into(), args: vec!["-3".into()] });
+    v.push(PythonCmd { program: "python".into(), args: Vec::new() });
+    v
+}
+
+/// Unix is untouched: `python3` is present and correct there.
+#[cfg(not(windows))]
+fn python_candidates(_idf_tools_path: Option<&Path>) -> Vec<PythonCmd> {
+    vec![PythonCmd { program: "python3".into(), args: Vec::new() }]
+}
+
 pub fn run_gif2c_sync(
     project: &Path,
     profile: &ProfileInfo,
@@ -131,21 +190,39 @@ pub fn run_gif2c_sync(
     let script = find_gif2c(project)?;
     let out_path = profile.profile_path.join("gif").join(format!("{}.c", emotion));
 
-    let output = Command::new("python3")
-        .arg(&script)
-        .arg(gif)
-        .arg("--name")
-        .arg(emotion)
-        .arg("-o")
-        .arg(&out_path)
-        .output()
-        .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                GifConvError::PythonMissing
-            } else {
-                GifConvError::ReadError(e.to_string())
+    let tools = crate::builder::resolved_idf_tools_path();
+    let candidates = python_candidates(tools.as_deref());
+
+    let mut tried: Vec<String> = Vec::new();
+    let mut success: Option<std::process::Output> = None;
+
+    for candidate in &candidates {
+        tried.push(describe_python(candidate));
+
+        let mut cmd = Command::new(&candidate.program);
+        cmd.args(&candidate.args)
+            .arg(&script)
+            .arg(gif)
+            .arg("--name")
+            .arg(emotion)
+            .arg("-o")
+            .arg(&out_path);
+
+        match cmd.output() {
+            // A spawned process that exits non-zero is still a found
+            // interpreter — the failure below reports it properly.
+            Ok(output) => {
+                success = Some(output);
+                break;
             }
-        })?;
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(GifConvError::ReadError(e.to_string())),
+        }
+    }
+
+    let Some(output) = success else {
+        return Err(GifConvError::PythonMissing(tried));
+    };
 
     let combined = format!(
         "{}\n{}",
@@ -287,5 +364,87 @@ mod tests {
 
         let written = profile.profile_path.join("gif").join("angry.c");
         assert!(written.is_file(), "no .c written to {}", written.display());
+    }
+
+    #[test]
+    fn test_python_missing_message_names_every_interpreter() {
+        let err = GifConvError::PythonMissing(vec![
+            "C:\\Espressif\\python_env\\idf5.5_py3.11_env\\Scripts\\python.exe".to_string(),
+            "py -3".to_string(),
+            "python".to_string(),
+        ]);
+        let msg = err.to_string();
+
+        assert!(msg.contains("idf5.5_py3.11_env"));
+        assert!(msg.contains("py -3"));
+        assert!(msg.contains("python"));
+        assert!(
+            msg.contains("pre-made .c file"),
+            "the message must offer the .c escape hatch: {}",
+            msg
+        );
+        assert!(
+            !msg.contains("Apple's developer tools"),
+            "that hint is macOS-only and must not survive: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_describe_python_joins_leading_args() {
+        assert_eq!(
+            describe_python(&PythonCmd { program: "python".to_string(), args: vec![] }),
+            "python"
+        );
+        assert_eq!(
+            describe_python(&PythonCmd { program: "py".to_string(), args: vec!["-3".to_string()] }),
+            "py -3"
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn test_python_candidates_unix_is_exactly_python3() {
+        // The non-goals promise Unix behaviour is unchanged.
+        let candidates = python_candidates(None);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].program, "python3");
+        assert!(candidates[0].args.is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_python_candidates_prefer_the_idf_env() {
+        let root = std::env::temp_dir().join(format!("gif_tool_py_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let scripts = root
+            .join("python_env")
+            .join("idf5.5_py3.11_env")
+            .join("Scripts");
+        std::fs::create_dir_all(&scripts).unwrap();
+        std::fs::write(scripts.join("python.exe"), b"stub").unwrap();
+
+        let candidates = python_candidates(Some(&root));
+
+        assert!(
+            candidates[0].program.ends_with("python.exe"),
+            "the IDF env must lead: {:?}",
+            candidates
+        );
+        assert!(candidates[0].program.contains("idf5.5_py3.11_env"));
+        assert_eq!(candidates[1].program, "py");
+        assert_eq!(candidates[1].args, vec!["-3".to_string()]);
+        assert_eq!(candidates[2].program, "python");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_python_candidates_without_idf_start_at_py() {
+        // A machine with Python but no ESP-IDF must still convert.
+        let candidates = python_candidates(None);
+        assert_eq!(candidates[0].program, "py");
+        assert_eq!(candidates[1].program, "python");
     }
 }
