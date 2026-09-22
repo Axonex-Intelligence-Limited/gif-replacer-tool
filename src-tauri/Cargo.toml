@@ -14,3 +14,11 @@ serialport = "4.2"
 
 [build-dependencies]
 tauri-build = { version = "1.5", features = [] }
+
+[features]
+# `tauri build` passes `--features custom-protocol` to this package by default.
+# Without this declaration the build dies before compiling a single file:
+#   error: the package 'gif-replacer-tool' does not contain this feature: custom-protocol
+# It is what switches the app from the dev-server URL to the bundled assets, so
+# `tauri dev` keeps working with it off. DO NOT REMOVE.
+custom-protocol = ["tauri/custom-protocol"]
