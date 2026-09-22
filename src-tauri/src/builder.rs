@@ -1,6 +1,10 @@
 // builder.rs - File replacement, build, and flash execution
 
 use std::fs;
+#[cfg(windows)]
+use std::io::Write;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::SystemTime;
@@ -17,6 +21,7 @@ pub enum BuilderError {
     PermissionDenied(String),
     IdfNotFound(String),
     BuildFailed(i32, String),
+    ScriptPathUnsuitable(String),
 }
 
 impl std::fmt::Display for BuilderError {
@@ -30,6 +35,7 @@ impl std::fmt::Display for BuilderError {
             Self::PermissionDenied(path) => write!(f, "Cannot write to {}. Check file permissions.", path),
             Self::IdfNotFound(msg) => write!(f, "ESP-IDF not found. {}", msg),
             Self::BuildFailed(code, msg) => write!(f, "Build failed with exit code {}: {}", code, msg),
+            Self::ScriptPathUnsuitable(msg) => write!(f, "{}", msg),
         }
     }
 }
@@ -40,6 +46,22 @@ pub struct BuildResult {
     pub success: bool,
     pub exit_code: i32,
     pub output: String,
+}
+
+/// The first character that cannot safely be interpolated into a `.bat`.
+///
+/// `%` expands as a variable, `!` under delayed expansion, and `&`/`^` chain or
+/// escape — quoting saves none of them. `<`, `>`, `|` and non-ASCII are the same
+/// class of problem: `cmd.exe` parses the file in the console OEM codepage, not
+/// UTF-8, so a path containing one is rewritten into a syntax error that points
+/// at the wrong line (spec §1c).
+///
+/// Pure, so the rule is testable on every platform; only the Windows arm of
+/// `idf_command` enforces it. Unix runs `sh -c` directly with no intermediate
+/// file.
+fn bat_unsafe_char(path: &str) -> Option<char> {
+    path.chars()
+        .find(|c| !c.is_ascii() || matches!(c, '%' | '!' | '&' | '^' | '<' | '>' | '|'))
 }
 
 /// Replaces a GIF file in the profile
@@ -390,6 +412,147 @@ pub fn check_flash_budget(
     })
 }
 
+/// A fresh, unpredictable script name. A fixed name in %TEMP% is something
+/// another process can pre-create.
+#[cfg(windows)]
+fn temp_script_path() -> PathBuf {
+    let nonce = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    std::env::temp_dir().join(format!("gif_tool_idf_{}_{}.bat", std::process::id(), nonce))
+}
+
+/// The creation flags for a build child.
+///
+/// The app is a GUI process and cmd.exe is a console app, so without this flag
+/// it allocates a console that sits on top of the window for the whole
+/// two-to-three minute build. Named rather than inlined because `Command` has
+/// no getter for it, so this is the only place a test can observe it.
+#[cfg(windows)]
+const fn build_child_creation_flags() -> u32 {
+    0x0800_0000 // CREATE_NO_WINDOW
+}
+
+/// Builds the `idf.py` invocation.
+///
+/// Windows uses a temporary `.bat`, not an inline `cmd /c "…"` string. The
+/// contract is `call "<idf>\export.bat"`, and Windows paths routinely contain
+/// spaces (`C:\Users\First Last\…`). Nesting those quotes inside a `/c` argument
+/// depends on Rust's argv quoting agreeing with `cmd.exe`'s parser, which it
+/// does not — Rust follows the MSVCRT backslash rules, which `cmd` does not
+/// understand. A `.bat` file removes the ambiguity entirely.
+///
+/// Returns the command and the script it points at, so the caller can delete
+/// the script once the child exits — nothing else cleans up %TEMP%.
+#[cfg(windows)]
+fn idf_command(
+    idf_path: &str,
+    project_path: &str,
+    idf_args: &str,
+) -> std::io::Result<(Command, Option<PathBuf>)> {
+    // Refuse before writing a script whose contents cmd.exe would misparse.
+    for (label, value) in [("idf_path", idf_path), ("project_path", project_path)] {
+        if let Some(bad) = bat_unsafe_char(value) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "{} contains '{}', which cannot be written into a Windows build script.\n\
+                     Keep both paths short and plain ASCII, e.g. C:\\Espressif and \
+                     C:\\dev\\EmotionDisplay.\n\
+                     Path was: {}",
+                    label, bad, value
+                ),
+            ));
+        }
+    }
+
+    let bat = temp_script_path();
+    {
+        let mut f = std::fs::File::create(&bat)?;
+        writeln!(f, "@echo off")?;
+        writeln!(f, "call \"{}\\export.bat\"", idf_path)?;
+        writeln!(f, "if errorlevel 1 exit /b 1")?;
+        writeln!(f, "cd /d \"{}\"", project_path)?;
+        writeln!(f, "idf.py {}", idf_args)?;
+    }
+
+    let mut c = Command::new("cmd");
+    c.arg("/c").arg(&bat);
+    // `cd /d` moves the build; current_dir keeps parity with the Unix path and
+    // is the only one of the two that works for a UNC project path.
+    c.current_dir(project_path);
+    // Equivalent to the Unix `unset`; avoids `set "VAR="` inside a /c argument.
+    c.env_remove("IDF_PATH");
+    c.env_remove("IDF_PYTHON_ENV_PATH");
+    // Without this, export.bat looks for the toolchain under
+    // %USERPROFILE%\.espressif and finds nothing. See idf_tools_path_for.
+    if let Some(tools) = idf_tools_path_for(Path::new(idf_path)) {
+        c.env("IDF_TOOLS_PATH", tools);
+    }
+    c.creation_flags(build_child_creation_flags());
+    Ok((c, Some(bat)))
+}
+
+/// The Unix arm: `sh -c` with `source`, unchanged from before this change.
+///
+/// There is no script — the command is self-contained — hence the `None`. Both
+/// arms return the same shape so callers never branch on the platform.
+#[cfg(not(windows))]
+fn idf_command(
+    idf_path: &str,
+    project_path: &str,
+    idf_args: &str,
+) -> std::io::Result<(Command, Option<PathBuf>)> {
+    // Unset inherited IDF env vars first: a stale IDF_PYTHON_ENV_PATH from a
+    // prior v6.2 activation would otherwise make `idf.py` run under the wrong
+    // python and halt with "Run fullclean".
+    let mut c = Command::new("sh");
+    c.arg("-c").arg(format!(
+        "unset IDF_PATH IDF_PYTHON_ENV_PATH VIRTUAL_ENV; source {}/export.sh && idf.py {}",
+        idf_path, idf_args
+    ));
+    c.current_dir(project_path);
+    Ok((c, None))
+}
+
+/// Runs one `idf.py` invocation and collects its output.
+///
+/// Build and flash both go through here so the environment cleanup, the script
+/// cleanup, and the output collection exist in exactly one place.
+fn run_idf(
+    project_path: &str,
+    idf_path: &str,
+    idf_args: &str,
+) -> Result<BuildResult, BuilderError> {
+    let (mut cmd, script) = idf_command(idf_path, project_path, idf_args).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::InvalidInput {
+            BuilderError::ScriptPathUnsuitable(e.to_string())
+        } else {
+            BuilderError::BuildFailed(-1, e.to_string())
+        }
+    })?;
+
+    let output = cmd
+        .output()
+        .map_err(|e| BuilderError::BuildFailed(-1, e.to_string()))?;
+
+    // Nothing else cleans up %TEMP%. A process killed mid-build leaks one file
+    // into it; that is acceptable and bounded.
+    if let Some(path) = script {
+        let _ = fs::remove_file(path);
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    Ok(BuildResult {
+        success: output.status.success(),
+        exit_code: output.status.code().unwrap_or(-1),
+        output: format!("{}\n{}", stdout, stderr),
+    })
+}
+
 /// Runs ESP-IDF build command
 ///
 /// # Arguments
@@ -400,86 +563,21 @@ pub fn check_flash_budget(
 /// * `Err(BuilderError)` - Command execution failed
 pub fn run_build_sync(project_path: &str) -> Result<BuildResult, BuilderError> {
     let idf_path = resolve_idf_path(config::load_config().idf_path.as_deref())?;
-
-    // Run build command. Unset inherited IDF env vars first: a stale
-    // IDF_PYTHON_ENV_PATH from a prior v6.2 activation would otherwise make
-    // `idf.py` run under the wrong python and halt with "Run fullclean".
-    let output = Command::new("sh")
-        .arg("-c")
-        .arg(format!(
-            "unset IDF_PATH IDF_PYTHON_ENV_PATH VIRTUAL_ENV; source {}/export.sh && idf.py build",
-            idf_path
-        ))
-        .current_dir(project_path)
-        .output()
-        .map_err(|e| BuilderError::BuildFailed(-1, e.to_string()))?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    let combined = format!("{}\n{}", stdout, stderr);
-
-    Ok(BuildResult {
-        success: output.status.success(),
-        exit_code: output.status.code().unwrap_or(-1),
-        output: combined,
-    })
+    run_idf(project_path, &idf_path, "build")
 }
 
-/// Runs ESP-IDF flash command
+/// Runs ESP-IDF flash command.
 ///
 /// # Arguments
 /// * `project_path` - Path to EmotionDisplay project
-/// * `serial_port` - Serial port path (e.g., /dev/cu.usbserial-210)
+/// * `serial_port` - Serial port name (`/dev/cu.usbserial-210`, `COM3`)
 ///
 /// # Returns
 /// * `Ok(BuildResult)` - Flash completed (check success field)
 /// * `Err(BuilderError)` - Command execution failed
 pub fn run_flash_sync(project_path: &str, serial_port: &str) -> Result<BuildResult, BuilderError> {
     let idf_path = resolve_idf_path(config::load_config().idf_path.as_deref())?;
-
-    // Verify serial port exists
-    if !std::path::Path::new(serial_port).exists() {
-        return Err(BuilderError::WriteError(format!(
-            "Device not found at {}. Check connection and try: ls /dev/cu.*",
-            serial_port
-        )));
-    }
-
-    // Run flash command (same env cleanup as build — see run_build_sync).
-    let output = Command::new("sh")
-        .arg("-c")
-        .arg(format!(
-            "unset IDF_PATH IDF_PYTHON_ENV_PATH VIRTUAL_ENV; source {}/export.sh && idf.py -p {} flash",
-            idf_path, serial_port
-        ))
-        .current_dir(project_path)
-        .output()
-        .map_err(|e| BuilderError::BuildFailed(-1, e.to_string()))?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    let combined = format!("{}\n{}", stdout, stderr);
-
-    // Check for common error patterns and provide helpful messages
-    let result_output = if combined.contains("Permission denied") {
-        format!(
-            "{}\n\nHint: Add your user to dialout group: sudo usermod -a -G dialout $USER",
-            combined
-        )
-    } else if combined.contains("Device or resource busy") {
-        format!(
-            "{}\n\nHint: Close any serial monitors (screen, minicom, idf.py monitor)",
-            combined
-        )
-    } else {
-        combined
-    };
-
-    Ok(BuildResult {
-        success: output.status.success(),
-        exit_code: output.status.code().unwrap_or(-1),
-        output: result_output,
-    })
+    run_idf(project_path, &idf_path, &format!("-p {} flash", serial_port))
 }
 
 #[cfg(test)]
@@ -734,5 +832,115 @@ mod tests {
     #[test]
     fn test_idf_tools_path_none_when_not_under_frameworks() {
         assert_eq!(idf_tools_path_for(Path::new(r"D:\idf\esp-idf-v5.5.2")), None);
+    }
+
+    #[test]
+    fn test_bat_unsafe_char_accepts_a_normal_path() {
+        assert_eq!(bat_unsafe_char(r"C:\Espressif\frameworks\esp-idf-v5.5.2"), None);
+        assert_eq!(bat_unsafe_char("/Users/dev/esp/esp-idf-v5.5.2"), None);
+    }
+
+    #[test]
+    fn test_bat_unsafe_char_rejects_expansion_and_chaining() {
+        assert_eq!(bat_unsafe_char(r"C:\100%Done"), Some('%'));
+        assert_eq!(bat_unsafe_char(r"C:\a!b"), Some('!'));
+        assert_eq!(bat_unsafe_char(r"C:\a&b"), Some('&'));
+        assert_eq!(bat_unsafe_char(r"C:\a^b"), Some('^'));
+    }
+
+    #[test]
+    fn test_bat_unsafe_char_rejects_non_ascii() {
+        // cmd.exe parses the .bat in the console OEM codepage, so a non-ASCII
+        // byte becomes a syntax error pointing at the wrong line.
+        assert_eq!(bat_unsafe_char(r"C:\Users\José\esp"), Some('é'));
+        assert_eq!(bat_unsafe_char(r"D:\项目\esp"), Some('项'));
+    }
+
+    #[test]
+    fn test_unsafe_script_path_error_names_the_character_and_the_rule() {
+        let msg = BuilderError::ScriptPathUnsuitable(
+            "project_path contains 'é', which cannot be written into a Windows build script."
+                .to_string(),
+        )
+        .to_string();
+        assert!(msg.contains('é'));
+        assert!(msg.contains("script"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_temp_script_path_shape() {
+        let path = temp_script_path();
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        assert!(name.starts_with("gif_tool_idf_"), "got {}", name);
+        assert!(name.ends_with(".bat"), "got {}", name);
+        assert!(name.contains(&std::process::id().to_string()), "got {}", name);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_build_child_suppresses_the_console() {
+        // A constructed Command exposes getters for program, args and env, but
+        // none for creation_flags — so the value is pinned here instead.
+        assert_eq!(build_child_creation_flags(), 0x0800_0000);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_idf_command_writes_the_expected_script() {
+        let dir = std::env::temp_dir().join(format!("gif_tool_cmd_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let (cmd, script) = idf_command(
+            r"C:\Espressif\frameworks\esp-idf-v5.5.2",
+            dir.to_str().unwrap(),
+            "build",
+        )
+        .unwrap();
+
+        let script = script.expect("the windows arm always has a script");
+        let body = fs::read_to_string(&script).unwrap();
+        assert!(body.starts_with("@echo off"), "got {}", body);
+        assert!(
+            body.contains(r#"call "C:\Espressif\frameworks\esp-idf-v5.5.2\export.bat""#),
+            "got {}",
+            body
+        );
+        assert!(body.contains("if errorlevel 1 exit /b 1"), "got {}", body);
+        assert!(body.contains("cd /d "), "got {}", body);
+        assert!(body.trim_end().ends_with("idf.py build"), "got {}", body);
+
+        assert_eq!(cmd.get_program(), std::ffi::OsStr::new("cmd"));
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        assert_eq!(args, vec!["/c".to_string(), script.to_string_lossy().to_string()]);
+
+        assert!(
+            cmd.get_envs().any(|(k, v)| k == "IDF_TOOLS_PATH" && v.is_some()),
+            "an installer-layout checkout must set IDF_TOOLS_PATH"
+        );
+        assert!(
+            cmd.get_envs().any(|(k, v)| k == "IDF_PATH" && v.is_none()),
+            "IDF_PATH must be unset, mirroring the Unix path"
+        );
+
+        let _ = fs::remove_file(&script);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_idf_command_refuses_a_non_ascii_project_path() {
+        let err = idf_command(
+            r"C:\Espressif\frameworks\esp-idf-v5.5.2",
+            "D:\\项目\\EmotionDisplay",
+            "build",
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("项目"));
     }
 }
