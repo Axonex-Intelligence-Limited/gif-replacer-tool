@@ -2,6 +2,10 @@
 
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use crate::builder::BuildResult;
+use crate::profile::ProfileInfo;
 
 /// The EmotionDisplay panel is 800x480 (main/lvgl_port.h:24-25).
 /// A GIF is embedded at its native size, so anything else renders wrong.
@@ -102,6 +106,67 @@ pub fn probe_gif(path: &Path) -> Result<GifProbe, GifConvError> {
     })
 }
 
+/// Locates the converter script inside an EmotionDisplay checkout. A missing
+/// script means the checkout predates commit fc2de1a.
+pub fn find_gif2c(project: &Path) -> Result<PathBuf, GifConvError> {
+    let script = project.join("tools").join("gif2c.py");
+    if script.is_file() {
+        Ok(script)
+    } else {
+        Err(GifConvError::Gif2cMissing(script))
+    }
+}
+
+/// Converts `gif` into `<profile>/gif/<emotion>.c` by invoking the project's own
+/// gif2c.py, so GCT repair and the self-check stay in one place.
+///
+/// gif2c.py writes its output only after its self-check passes, so a rejection
+/// here leaves the existing .c file untouched.
+pub fn run_gif2c_sync(
+    project: &Path,
+    profile: &ProfileInfo,
+    gif: &Path,
+    emotion: &str,
+) -> Result<BuildResult, GifConvError> {
+    let script = find_gif2c(project)?;
+    let out_path = profile.profile_path.join("gif").join(format!("{}.c", emotion));
+
+    let output = Command::new("python3")
+        .arg(&script)
+        .arg(gif)
+        .arg("--name")
+        .arg(emotion)
+        .arg("-o")
+        .arg(&out_path)
+        .output()
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                GifConvError::PythonMissing
+            } else {
+                GifConvError::ReadError(e.to_string())
+            }
+        })?;
+
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    if !output.status.success() {
+        return Err(GifConvError::ConversionFailed {
+            exit_code: output.status.code().unwrap_or(-1),
+            output: combined,
+        });
+    }
+
+    Ok(BuildResult {
+        success: true,
+        exit_code: 0,
+        output: combined,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -168,5 +233,23 @@ mod tests {
         let p = std::env::temp_dir().join("gifconv_test_definitely_absent.gif");
         let _ = std::fs::remove_file(&p);
         assert!(matches!(probe_gif(&p), Err(GifConvError::ReadError(_))));
+    }
+
+    #[test]
+    fn find_gif2c_reports_missing_script() {
+        let dir = std::env::temp_dir().join(format!("gifconv_noscript_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        match find_gif2c(&dir) {
+            Err(GifConvError::Gif2cMissing(p)) => assert!(p.ends_with("tools/gif2c.py")),
+            other => panic!("expected Gif2cMissing, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn find_gif2c_locates_script_when_present() {
+        let dir = std::env::temp_dir().join(format!("gifconv_script_{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("tools")).unwrap();
+        std::fs::write(dir.join("tools").join("gif2c.py"), b"# stub").unwrap();
+        assert_eq!(find_gif2c(&dir).unwrap(), dir.join("tools").join("gif2c.py"));
     }
 }
