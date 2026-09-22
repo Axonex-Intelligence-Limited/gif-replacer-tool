@@ -439,21 +439,45 @@ mod tests {
 
     #[test]
     fn test_profile_detection() {
-        // NOTE: Update this path to your actual EmotionDisplay project
-        let project_path = "/Users/anthony/Documents/Axonex/Universalplugdisplay/EmotionDisplay";
+        // A synthetic checkout, shaped like a real profile: mixed-case GifEntry,
+        // an extern "C" block, a #define default. detect_active_profile reads
+        // sdkconfig.defaults (not the generated sdkconfig), so the fixture needs
+        // only the name override and the header.
+        let dir = std::env::temp_dir().join(format!("gif_tool_profile_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let profile_dir = dir.join("main").join("floki");
+        fs::create_dir_all(&profile_dir).unwrap();
 
-        match detect_active_profile(project_path) {
-            Ok(info) => {
-                println!("✓ Profile detected: {}", info.profile);
-                println!("✓ Emotions: {:?}", info.emotions);
-                assert!(!info.profile.is_empty());
-                assert!(!info.emotions.is_empty());
-            }
-            Err(e) => {
-                // If test fails, print helpful message
-                panic!("Profile detection failed: {}\nUpdate the project_path in this test to your EmotionDisplay location", e);
-            }
-        }
+        fs::write(
+            dir.join("sdkconfig.defaults"),
+            "CONFIG_GIF_PROFILE_NAME=\"floki\"\n",
+        )
+        .unwrap();
+        fs::write(
+            profile_dir.join("gif_profile.h"),
+            r#"
+extern "C" {
+    extern const lv_img_dsc_t angry;
+    extern const lv_img_dsc_t happy;
+}
+
+#define GIF_PROFILE_DEFAULT happy
+
+struct GifEntry { const char* name; const lv_img_dsc_t* dsc; };
+static const GifEntry gif_table[] = {
+    {"angry", &angry},
+    {"happy", &happy},
+};
+"#,
+        )
+        .unwrap();
+
+        let info = detect_active_profile(dir.to_str().unwrap()).unwrap();
+        assert_eq!(info.profile, "floki");
+        assert_eq!(info.emotions, vec!["angry", "happy"]);
+        assert_eq!(info.symbols, vec!["angry", "happy"]);
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
