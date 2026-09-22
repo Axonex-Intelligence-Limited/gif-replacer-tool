@@ -20,7 +20,6 @@ async function initApp() {
 
     const invoke = window.__TAURI__.tauri.invoke;
     const listen = window.__TAURI__.event.listen;
-    const shell = window.__TAURI__.shell;
 
     // State
     let currentFile = null;
@@ -31,7 +30,6 @@ async function initApp() {
     let activeProfile = null;
 
     // DOM Elements
-    const openConverterBtn = document.getElementById('open-converter-btn');
     const projectPathInput = document.getElementById('project-path-input');
     const browseProjectBtn = document.getElementById('browse-project-btn');
     const profileSelector = document.getElementById('profile-selector');
@@ -261,19 +259,30 @@ async function initApp() {
         }
     }
 
-    // File handling
+    // File handling — dispatches on extension
     async function handleFile(filePath) {
-        try {
-            const result = await invoke('validate_c_file', { filePath });
+        const ext = filePath.split('.').pop().toLowerCase();
+        const baseName = filePath.split('/').pop();
 
-            currentFile = filePath;
-            fileName.textContent = result.original_name;
-            fileSize.textContent = result.file_size_bytes;
+        try {
+            if (ext === 'gif') {
+                const result = await invoke('validate_gif_file', { filePath });
+                currentFile = filePath;
+                fileName.textContent = `${baseName} (${result.width}×${result.height})`;
+                fileSize.textContent = result.file_size_bytes;
+                logOutput(`✓ Loaded GIF: ${result.width}×${result.height}`);
+            } else if (ext === 'c') {
+                const result = await invoke('validate_c_file', { filePath });
+                currentFile = filePath;
+                fileName.textContent = result.original_name;
+                fileSize.textContent = result.file_size_bytes;
+                logOutput(`✓ Loaded file: ${result.original_name}`);
+            } else {
+                throw new Error('Drop a .gif or .c file.');
+            }
 
             dropPlaceholder.style.display = 'none';
             fileInfo.style.display = 'block';
-
-            logOutput(`✓ Loaded file: ${result.original_name}`);
             updateRunButton();
         } catch (err) {
             logOutput(`❌ Invalid file: ${err}`);
@@ -295,17 +304,7 @@ async function initApp() {
         runBtn.disabled = !isReady;
     }
 
-    // Step 1: Open LVGL converter
-    openConverterBtn.addEventListener('click', async () => {
-        try {
-            await shell.open('https://lvgl.io/tools/imageconverter');
-        } catch (err) {
-            console.error('Failed to open URL:', err);
-            alert('Failed to open browser: ' + err);
-        }
-    });
-
-    // Step 2: Project path handling
+    // Step 1: Project path handling
     projectPathInput.addEventListener('input', updateRunButton);
 
     projectPathInput.addEventListener('change', async () => {
@@ -461,8 +460,8 @@ async function initApp() {
             const selected = await open({
                 multiple: false,
                 filters: [{
-                    name: 'C Files',
-                    extensions: ['c']
+                    name: 'GIF or C Files',
+                    extensions: ['gif', 'c']
                 }]
             });
             console.log('Selected file:', selected);
@@ -546,6 +545,44 @@ async function initApp() {
             return;
         }
 
+        // Flash budget guard: only meaningful for a .gif, which is the only
+        // input whose size we don't already know to be correct.
+        if (currentFile.toLowerCase().endsWith('.gif')) {
+            try {
+                const budget = await invoke('check_flash_budget', {
+                    projectPath: config.project_path,
+                    targetEmotion: currentEmotion,
+                    gifPath: currentFile,
+                });
+
+                if (budget.overflows) {
+                    const kb = (n) => Math.round(n / 1024);
+                    const headroom = budget.headroom_bytes === null
+                        ? 'an unknown amount (this project has not been built yet)'
+                        : `~${kb(budget.headroom_bytes)} KB`;
+                    const sign = budget.delta_bytes >= 0 ? '+' : '';
+
+                    const proceed = await window.__TAURI__.dialog.ask(
+                        `This GIF is ${kb(budget.incoming_bytes)} KB.\n` +
+                        `The file it replaces holds ${kb(budget.current_bytes)} KB.\n\n` +
+                        `That is ${sign}${kb(budget.delta_bytes)} KB against ${headroom} ` +
+                        `free in the app partition.\n\n` +
+                        `The build will overflow unless you free space first ` +
+                        `(see the README on nullptr gif_table entries).`,
+                        { title: 'Flash budget', type: 'warning' }
+                    );
+
+                    if (!proceed) {
+                        logOutput('ℹ Cancelled at the flash budget prompt.');
+                        return;
+                    }
+                }
+            } catch (err) {
+                // Advisory only — never block the run on a failed budget check.
+                logOutput(`⚠ Could not check the flash budget: ${err}`);
+            }
+        }
+
         runBtn.disabled = true;
         setStatus('running', 'Running...');
         outputLog.textContent = '';
@@ -561,7 +598,7 @@ async function initApp() {
         try {
             const result = await invoke('replace_and_build_flash', {
                 projectPath: config.project_path,
-                cFilePath: currentFile,
+                sourceFilePath: currentFile,
                 targetEmotion: currentEmotion,
                 serialPort: selectedPort,
             });
