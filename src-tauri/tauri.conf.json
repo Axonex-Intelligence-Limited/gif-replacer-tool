@@ -29,11 +29,22 @@
       }
     },
     "bundle": {
-      "active": false,
+      "active": true,
       "identifier": "com.axonex.gif-replacer-tool",
-      "icon": [],
+      "icon": [
+        "icons/32x32.png",
+        "icons/128x128.png",
+        "icons/icon.ico"
+      ],
       "resources": [],
-      "targets": "all"
+      "targets": [
+        "nsis"
+      ],
+      "windows": {
+        "webviewInstallMode": {
+          "type": "embedBootstrapper"
+        }
+      }
     },
     "windows": [
       {
