@@ -548,38 +548,55 @@ async function initApp() {
         // Flash budget guard: only meaningful for a .gif, which is the only
         // input whose size we don't already know to be correct.
         if (currentFile.toLowerCase().endsWith('.gif')) {
+            let budget = null;
             try {
-                const budget = await invoke('check_flash_budget', {
+                budget = await invoke('check_flash_budget', {
                     projectPath: config.project_path,
                     targetEmotion: currentEmotion,
                     gifPath: currentFile,
                 });
-
-                if (budget.overflows) {
-                    const kb = (n) => Math.round(n / 1024);
-                    const headroom = budget.headroom_bytes === null
-                        ? 'an unknown amount (this project has not been built yet)'
-                        : `~${kb(budget.headroom_bytes)} KB`;
-                    const sign = budget.delta_bytes >= 0 ? '+' : '';
-
-                    const proceed = await window.__TAURI__.dialog.ask(
-                        `This GIF is ${kb(budget.incoming_bytes)} KB.\n` +
-                        `The file it replaces holds ${kb(budget.current_bytes)} KB.\n\n` +
-                        `That is ${sign}${kb(budget.delta_bytes)} KB against ${headroom} ` +
-                        `free in the app partition.\n\n` +
-                        `The build will overflow unless you free space first ` +
-                        `(see the README on nullptr gif_table entries).`,
-                        { title: 'Flash budget', type: 'warning' }
-                    );
-
-                    if (!proceed) {
-                        logOutput('ℹ Cancelled at the flash budget prompt.');
-                        return;
-                    }
-                }
             } catch (err) {
-                // Advisory only — never block the run on a failed budget check.
+                // We could not even compute the budget. Warn and carry on —
+                // this is the genuinely advisory case.
                 logOutput(`⚠ Could not check the flash budget: ${err}`);
+            }
+
+            if (budget && budget.overflows) {
+                const kb = (n) => Math.round(n / 1024);
+                const headroom = budget.headroom_bytes === null
+                    ? 'an unknown amount (this project has not been built yet)'
+                    : `~${kb(budget.headroom_bytes)} KB`;
+                const sign = budget.delta_bytes >= 0 ? '+' : '';
+
+                const message =
+                    `This GIF is ${kb(budget.incoming_bytes)} KB.\n` +
+                    `The file it replaces holds ${kb(budget.current_bytes)} KB.\n\n` +
+                    `That is ${sign}${kb(budget.delta_bytes)} KB against ${headroom} ` +
+                    `free in the app partition.\n\n` +
+                    `The build will overflow unless you free space first ` +
+                    `(see the README on nullptr gif_table entries).`;
+
+                let proceed = false;
+                try {
+                    proceed = await window.__TAURI__.dialog.ask(message, {
+                        title: 'Flash budget',
+                        type: 'warning',
+                    });
+                } catch (dlgErr) {
+                    // The confirm dialog is unavailable (e.g. the tauri
+                    // `dialog-ask` feature was not compiled in). We know the
+                    // build will overflow, so we must NOT fall through to it
+                    // silently — that is exactly how an over-budget build gets
+                    // two minutes of build time and an opaque linker error.
+                    alert(`${message}\n\nFree space first, then run again.`);
+                    logOutput('❌ Flash budget warning could not be shown as a prompt — run cancelled.');
+                    return;
+                }
+
+                if (!proceed) {
+                    logOutput('ℹ Cancelled at the flash budget prompt.');
+                    return;
+                }
             }
         }
 
