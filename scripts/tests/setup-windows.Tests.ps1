@@ -140,7 +140,7 @@ Describe 'Get-InstallerArgs' {
 
     It 'does not pass /IDFVERSION, which cannot help a version-specific installer' {
         # The offline installer IS the 5.5.2 build. /IDFVERSION drives the
-        # legacy installer's dropdown, which reads idf_versions.txt — a list
+        # legacy installer's dropdown, which reads idf_versions.txt - a list
         # that does not contain 5.5.2.
         (Get-InstallerArgs -IdfDir 'C:\Espressif' -LogPath 'x') -join ' ' |
             Should -Not -BeLike '*/IDFVERSION*'
