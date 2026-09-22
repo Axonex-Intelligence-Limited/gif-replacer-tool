@@ -69,6 +69,83 @@ function Fail {
     exit 1
 }
 
+# ------------------------------------------------------ IDF discovery (pure)
+#
+# Mirrors builder.rs::idf_candidates. The Rust and PowerShell copies must agree;
+# if one changes, change the other. Inputs are explicit so this is testable on
+# macOS, where none of these paths exist.
+
+# Windows-path join, deliberately NOT Join-Path.
+#
+# Join-Path is wrong here twice over: it resolves the drive (throwing
+# DriveNotFoundException for a path on a drive this host does not have), and it
+# uses the HOST separator — so on macOS it would build
+# "/frameworks/esp-idf-v5.5.2" for what is meant to be a Windows path. These
+# are Windows paths and must be built identically wherever they are built.
+function Join-WindowsPath {
+    param([Parameter(Mandatory)][string]$Base, [Parameter(Mandatory)][string]$Child)
+    return $Base.TrimEnd('\', '/') + '\' + $Child.TrimStart('\', '/')
+}
+
+function Get-IdfCandidates {
+    param(
+        [string]$Configured,
+        [hashtable]$Environment,
+        [string]$Profile
+    )
+
+    $v = [System.Collections.Generic.List[string]]::new()
+
+    if ($Configured) { $v.Add($Configured) }
+
+    # IDF_TOOLS_PATH points at the tools root; the framework sits under it.
+    if ($Environment.ContainsKey('IDF_TOOLS_PATH') -and $Environment['IDF_TOOLS_PATH']) {
+        $v.Add((Join-WindowsPath $Environment['IDF_TOOLS_PATH'] 'frameworks\esp-idf-v5.5.2'))
+    }
+
+    # The official installer's default layout, then the two common hand-clone
+    # locations. Same order as the Rust function.
+    $v.Add('C:\Espressif\frameworks\esp-idf-v5.5.2')
+    if ($Profile) { $v.Add((Join-WindowsPath $Profile 'esp\esp-idf-v5.5.2')) }
+    $v.Add('C:\esp\esp-idf-v5.5.2')
+
+    return $v.ToArray()
+}
+
+# export.bat is the marker builder.rs uses (idf_marker() returns it on Windows).
+#
+# The $IDF_PATH fallback is not decoration: resolve_idf_path checks the probe
+# list first and then falls back to the environment variable, WITHOUT requiring
+# the marker to be there. Dropping it would make this script miss an install
+# the app would use.
+function Find-IdfPath {
+    param([string[]]$Candidates, [hashtable]$Environment = @{})
+
+    foreach ($c in $Candidates) {
+        if (-not $c) { continue }
+
+        # BOTH calls are inside the try on purpose. Join-Path resolves the
+        # drive as well as Test-Path, so a candidate naming a drive that does
+        # not exist throws from Join-Path — before Test-Path is even reached.
+        # That is not hypothetical: a configured idf_path pointing at an
+        # unplugged removable drive hits it, and the throw would abort setup
+        # with a raw exception instead of trying the next candidate.
+        $found = $false
+        try {
+            $marker = Join-Path $c 'export.bat'
+            $found  = Test-Path -LiteralPath $marker
+        }
+        catch { $found = $false }
+
+        if ($found) { return $c }
+    }
+
+    if ($Environment.ContainsKey('IDF_PATH') -and $Environment['IDF_PATH']) {
+        return $Environment['IDF_PATH']
+    }
+    return $null
+}
+
 # Dot-sourcing (how the tests load this file) leaves InvocationName as '.';
 # running it as a script sets it to the script path. The tests need the
 # functions without the main body firing.
