@@ -4,6 +4,7 @@ mod profile;
 mod parser;
 mod builder;
 mod config;
+mod gifconv;
 
 use tauri::Manager;
 
