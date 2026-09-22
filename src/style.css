@@ -236,3 +236,42 @@ input[type="text"]:focus {
     width: 100%;
 }
 
+
+/* In-app confirmation modal (replaces the Tauri native dialog, which depends
+   on the `dialog-ask` Cargo feature being compiled in). */
+.modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.45);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+}
+
+.modal-box {
+    background: #fff;
+    border-radius: 8px;
+    padding: 20px;
+    max-width: 520px;
+    width: 90%;
+    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+}
+
+.modal-box h3 {
+    margin: 0 0 12px;
+}
+
+.modal-box pre {
+    white-space: pre-wrap;
+    font-family: inherit;
+    font-size: inherit;
+    margin: 0 0 16px;
+    line-height: 1.5;
+}
+
+.modal-actions {
+    display: flex;
+    gap: 10px;
+    justify-content: flex-end;
+}

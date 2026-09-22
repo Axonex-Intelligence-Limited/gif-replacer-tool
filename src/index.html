@@ -95,6 +95,21 @@
         </div>
     </main>
 
+    <!-- Confirmation modal. Deliberately in-app rather than a Tauri native
+         dialog: window.__TAURI__.dialog.ask only exists when the tauri
+         `dialog-ask` feature is compiled in, and when it isn't the budget
+         guard loses its voice entirely. -->
+    <div id="confirm-modal" class="modal-overlay" style="display: none;">
+        <div class="modal-box">
+            <h3 id="confirm-title">Are you sure?</h3>
+            <pre id="confirm-body"></pre>
+            <div class="modal-actions">
+                <button id="confirm-cancel" class="secondary-btn">Cancel</button>
+                <button id="confirm-ok" class="primary-btn">Continue anyway</button>
+            </div>
+        </div>
+    </div>
+
     <script src="app.js"></script>
 </body>
 </html>

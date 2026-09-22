@@ -56,6 +56,12 @@ async function initApp() {
     const runBtn = document.getElementById('run-btn');
     const outputLog = document.getElementById('output-log');
 
+    const confirmModal = document.getElementById('confirm-modal');
+    const confirmTitle = document.getElementById('confirm-title');
+    const confirmBody = document.getElementById('confirm-body');
+    const confirmOk = document.getElementById('confirm-ok');
+    const confirmCancel = document.getElementById('confirm-cancel');
+
     // Initialize
     async function init() {
         try {
@@ -584,22 +590,9 @@ async function initApp() {
                     `The build will overflow unless you free space first ` +
                     `(see the README on nullptr gif_table entries).`;
 
-                let proceed = false;
-                try {
-                    proceed = await window.__TAURI__.dialog.ask(message, {
-                        title: 'Flash budget',
-                        type: 'warning',
-                    });
-                } catch (dlgErr) {
-                    // The confirm dialog is unavailable (e.g. the tauri
-                    // `dialog-ask` feature was not compiled in). We know the
-                    // build will overflow, so we must NOT fall through to it
-                    // silently — that is exactly how an over-budget build gets
-                    // two minutes of build time and an opaque linker error.
-                    alert(`${message}\n\nFree space first, then run again.`);
-                    logOutput('❌ Flash budget warning could not be shown as a prompt — run cancelled.');
-                    return;
-                }
+                logOutput(`⚠ Flash budget: ${message.replace(/\n+/g, ' ')}`);
+
+                const proceed = await confirmInApp('Flash budget', message);
 
                 if (!proceed) {
                     logOutput('ℹ Cancelled at the flash budget prompt.');
@@ -651,6 +644,30 @@ async function initApp() {
     function setStatus(type, message) {
         statusDiv.className = `status ${type}`;
         statusDiv.textContent = message;
+    }
+
+    // In-app confirmation. Deliberately NOT window.__TAURI__.dialog.ask:
+    // that API only exists when the tauri `dialog-ask` Cargo feature is
+    // compiled in, and when it isn't the budget guard silently loses its
+    // voice (or worse, blocks every run). This always works.
+    function confirmInApp(title, body) {
+        return new Promise((resolve) => {
+            confirmTitle.textContent = title;
+            confirmBody.textContent = body;
+            confirmModal.style.display = 'flex';
+
+            function finish(result) {
+                confirmModal.style.display = 'none';
+                confirmOk.removeEventListener('click', onOk);
+                confirmCancel.removeEventListener('click', onCancel);
+                resolve(result);
+            }
+            function onOk() { finish(true); }
+            function onCancel() { finish(false); }
+
+            confirmOk.addEventListener('click', onOk);
+            confirmCancel.addEventListener('click', onCancel);
+        });
     }
 
     function logOutput(message) {
