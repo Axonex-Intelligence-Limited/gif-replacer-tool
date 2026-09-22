@@ -133,27 +133,111 @@ struct ValidateResponse {
     file_size_bytes: usize,
 }
 
+#[derive(serde::Serialize)]
+struct GifProbeResponse {
+    version: String,
+    width: u16,
+    height: u16,
+    file_size_bytes: u64,
+}
+
+#[tauri::command]
+fn validate_gif_file(file_path: String) -> Result<GifProbeResponse, String> {
+    let probe = gifconv::probe_gif(std::path::Path::new(&file_path))
+        .map_err(|e| e.to_string())?;
+
+    Ok(GifProbeResponse {
+        version: probe.version,
+        width: probe.width,
+        height: probe.height,
+        file_size_bytes: probe.bytes,
+    })
+}
+
+#[derive(serde::Serialize)]
+struct BudgetResponse {
+    incoming_bytes: u64,
+    current_bytes: u64,
+    headroom_bytes: Option<u64>,
+    delta_bytes: i64,
+    overflows: bool,
+}
+
+#[tauri::command]
+fn check_flash_budget(
+    project_path: String,
+    target_emotion: String,
+    gif_path: String,
+) -> Result<BudgetResponse, String> {
+    let profile = profile::detect_active_profile(&project_path)
+        .map_err(|e| e.to_string())?;
+
+    let incoming_bytes = std::fs::metadata(&gif_path)
+        .map(|m| m.len())
+        .unwrap_or(0);
+
+    let check =
+        builder::check_flash_budget(&project_path, &profile, &target_emotion, incoming_bytes)
+            .map_err(|e| e.to_string())?;
+
+    Ok(BudgetResponse {
+        incoming_bytes: check.incoming_bytes,
+        current_bytes: check.current_bytes,
+        headroom_bytes: check.headroom_bytes,
+        delta_bytes: check.delta_bytes,
+        overflows: check.overflows,
+    })
+}
+
 #[tauri::command]
 async fn replace_and_build_flash(
     app_handle: tauri::AppHandle,
     project_path: String,
-    c_file_path: String,
+    source_file_path: String,
     target_emotion: String,
     serial_port: String,
 ) -> Result<BuildFlashResponse, String> {
-    // Step 1: Read and rename
-    let content = std::fs::read_to_string(&c_file_path)
-        .map_err(|e| format!("Read error: {}", e))?;
-    let renamed = parser::rename_symbols(&content, &target_emotion)
-        .map_err(|e| e.to_string())?;
-
-    // Step 2: Get profile and replace file
+    // Step 1: Get profile and validate the target slot up front — gif2c.py
+    // would otherwise write a .c for an emotion the profile doesn't have.
     let profile = profile::detect_active_profile(&project_path)
         .map_err(|e| e.to_string())?;
-    builder::replace_gif_file(&profile, &target_emotion, &renamed)
+    builder::validate_emotion(&profile, &target_emotion)
         .map_err(|e| e.to_string())?;
 
-    emit_log(&app_handle, &format!("✓ Replaced main/{}/gif/{}.c", profile.profile, target_emotion));
+    let is_gif = source_file_path
+        .rsplit('.')
+        .next()
+        .map(|e| e.eq_ignore_ascii_case("gif"))
+        .unwrap_or(false);
+
+    // Step 2: Produce the .c — either convert, or rename an existing one.
+    if is_gif {
+        let result = gifconv::run_gif2c_sync(
+            std::path::Path::new(&project_path),
+            &profile,
+            std::path::Path::new(&source_file_path),
+            &target_emotion,
+        )
+        .map_err(|e| e.to_string())?;
+
+        for line in result.output.lines() {
+            emit_log(&app_handle, line);
+        }
+        emit_log(
+            &app_handle,
+            &format!("✓ Converted to main/{}/gif/{}.c", profile.profile, target_emotion),
+        );
+    } else {
+        let content = std::fs::read_to_string(&source_file_path)
+            .map_err(|e| format!("Read error: {}", e))?;
+        let renamed = parser::rename_symbols(&content, &target_emotion)
+            .map_err(|e| e.to_string())?;
+
+        builder::replace_gif_file(&profile, &target_emotion, &renamed)
+            .map_err(|e| e.to_string())?;
+
+        emit_log(&app_handle, &format!("✓ Replaced main/{}/gif/{}.c", profile.profile, target_emotion));
+    }
 
     // Step 3: Build + flash
     let mut result = do_build_and_flash(app_handle, project_path, serial_port).await?;
@@ -298,6 +382,8 @@ fn main() {
             reset_profile_to_default,
             list_serial_ports,
             validate_c_file,
+            validate_gif_file,
+            check_flash_budget,
             replace_and_build_flash,
             build_and_flash,
             browse_folder,
