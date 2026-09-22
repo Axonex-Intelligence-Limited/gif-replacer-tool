@@ -34,6 +34,29 @@ jobs:
       - name: Unit tests
         run: cargo test --manifest-path src-tauri/Cargo.toml
 
+      # setup-windows.ps1 is a separate deliverable from the .exe (it ships as
+      # its own release asset), and cargo test does not touch it. Until this
+      # step existed, its 39 tests ran only on a developer's machine.
+      #
+      # Running them here also executes them against real Windows path
+      # semantics for the first time. Locally they run on macOS, where
+      # Test-Path and Join-Path handle the C:\-prefixed fixtures differently -
+      # which is what caught the DriveNotFoundException and host-separator bugs
+      # during development, and means the suite has never been proven on the
+      # platform it targets.
+      - name: Install Pester
+        shell: pwsh
+        run: Install-Module Pester -Scope CurrentUser -Force -SkipPublisherCheck
+
+      - name: Pester tests (Windows setup script)
+        shell: pwsh
+        run: |
+          $r = Invoke-Pester -Path ./scripts/tests -PassThru
+          if ($r.Result -ne 'Passed') {
+            Write-Error "$($r.FailedCount) of $($r.TotalCount) Pester tests failed."
+            exit 1
+          }
+
       - run: npm ci
 
       - name: Build

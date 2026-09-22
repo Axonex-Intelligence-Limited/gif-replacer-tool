@@ -66,7 +66,10 @@ cd src-tauri && cargo test
 pwsh -NoProfile -Command 'Invoke-Pester -Path ./scripts/tests'
 ```
 
-The Pester tests skip the parts that need Windows. CI runs both suites on `windows-latest`.
+CI (`.github/workflows/build-windows.yml`) runs both suites on `windows-latest`. That matters for
+the Pester tests specifically: locally they run on macOS, where `Test-Path` and `Join-Path` treat the
+`C:\`-prefixed fixtures differently, so CI is the only place they execute against the path semantics
+the script actually targets.
 
 ## Known limitations
 

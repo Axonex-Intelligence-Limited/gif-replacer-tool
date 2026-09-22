@@ -153,15 +153,18 @@ Describe 'Wait-ProcessGone' {
             Should -BeTrue
     }
 
-    It 'returns false when the process outlives the timeout' {
-        $p = Start-Process -FilePath 'sleep' -ArgumentList '30' -PassThru -ErrorAction SilentlyContinue
-        if (-not $p) { Set-ItResult -Skipped -Because 'sleep unavailable'; return }
+    It 'returns false when a matching process exists for the whole timeout' {
+        # Uses the test host's OWN process name rather than `sleep`.
+        #
+        # `sleep` works on macOS, where it is /bin/sleep, but not on Windows:
+        # there `sleep` is only a PowerShell alias for Start-Sleep, and
+        # Start-Process cannot launch an alias - it fails to resolve the file.
+        # The host process is guaranteed present on every platform and will
+        # still be running when the timeout expires, which is precisely the
+        # condition under test.
+        $name = (Get-Process -Id $PID).ProcessName
 
-        try {
-            (Wait-ProcessGone -Name 'sleep' -TimeoutSeconds 2 -PollSeconds 1) | Should -BeFalse
-        } finally {
-            Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
-        }
+        (Wait-ProcessGone -Name $name -TimeoutSeconds 2 -PollSeconds 1) | Should -BeFalse
     }
 }
 
