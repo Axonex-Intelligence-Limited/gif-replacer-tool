@@ -178,3 +178,38 @@ Describe 'Get-InstallerLogVerdict' {
         Get-InstallerLogVerdict -LogText '' | Should -Be 'Failed'
     }
 }
+
+Describe 'Get-BridgeFromHardwareIds' {
+    It 'recognises a CH340' {
+        Get-BridgeFromHardwareIds -HardwareIds @('USB\VID_1A86&PID_7523&REV_0264') |
+            Should -Be 'CH340'
+    }
+
+    It 'recognises a CP210x' {
+        Get-BridgeFromHardwareIds -HardwareIds @('USB\VID_10C4&PID_EA60&REV_0100') |
+            Should -Be 'CP210x'
+    }
+
+    It 'recognises an FTDI' {
+        Get-BridgeFromHardwareIds -HardwareIds @('USB\VID_0403&PID_6001') |
+            Should -Be 'FTDI'
+    }
+
+    It 'is case-insensitive, because Windows reports both cases' {
+        Get-BridgeFromHardwareIds -HardwareIds @('usb\vid_1a86&pid_7523') |
+            Should -Be 'CH340'
+    }
+
+    It 'returns null for an unrelated device' {
+        Get-BridgeFromHardwareIds -HardwareIds @('USB\VID_046D&PID_C52B') | Should -BeNullOrEmpty
+    }
+
+    It 'returns null for an empty device list' {
+        Get-BridgeFromHardwareIds -HardwareIds @() | Should -BeNullOrEmpty
+    }
+
+    It 'picks the bridge out of a mixed list' {
+        $ids = @('USB\VID_046D&PID_C52B', 'USB\VID_1A86&PID_7523')
+        Get-BridgeFromHardwareIds -HardwareIds $ids | Should -Be 'CH340'
+    }
+}

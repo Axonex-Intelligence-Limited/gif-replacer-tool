@@ -217,6 +217,30 @@ function Get-InstallerLogVerdict {
     return 'Failed'
 }
 
+# ------------------------------------------------------ driver detection
+#
+# Vendor IDs, not port names. A CH340 is 1A86, a CP210x is 10C4, an FTDI is
+# 0403. Matching the hardware ID is exact; matching "/dev/cu.usbserial-*" is a
+# guess that happens to be right on macOS.
+
+$script:BridgeVendorIds = [ordered]@{
+    '1A86' = 'CH340'    # WCH — needs WCH's own driver
+    '10C4' = 'CP210x'   # Silicon Labs — covered by the ESP-IDF installer
+    '0403' = 'FTDI'     # FTDI — covered by the ESP-IDF installer
+}
+
+function Get-BridgeFromHardwareIds {
+    param([string[]]$HardwareIds)
+
+    foreach ($id in $HardwareIds) {
+        if ($id -match 'VID_([0-9A-Fa-f]{4})') {
+            $vid = $Matches[1].ToUpperInvariant()
+            if ($script:BridgeVendorIds.Contains($vid)) { return $script:BridgeVendorIds[$vid] }
+        }
+    }
+    return $null
+}
+
 # Dot-sourcing (how the tests load this file) leaves InvocationName as '.';
 # running it as a script sets it to the script path. The tests need the
 # functions without the main body firing.
