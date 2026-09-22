@@ -47,18 +47,26 @@ pub struct BuildResult {
 /// # Returns
 /// * `Ok(())` - File replaced successfully
 /// * `Err(BuilderError)` - Validation or write error
-pub fn replace_gif_file(
-    profile: &ProfileInfo,
-    emotion: &str,
-    content: &str,
-) -> Result<(), BuilderError> {
-    // Validate emotion is in profile.emotions list
+/// Validates that `emotion` is one of the profile's slots.
+///
+/// Split out of `replace_gif_file` because the .gif conversion path needs the
+/// check without the write — gif2c.py writes the .c file itself.
+pub fn validate_emotion(profile: &ProfileInfo, emotion: &str) -> Result<(), BuilderError> {
     if !profile.emotions.contains(&emotion.to_string()) {
         return Err(BuilderError::InvalidEmotion(
             emotion.to_string(),
             profile.emotions.clone(),
         ));
     }
+    Ok(())
+}
+
+pub fn replace_gif_file(
+    profile: &ProfileInfo,
+    emotion: &str,
+    content: &str,
+) -> Result<(), BuilderError> {
+    validate_emotion(profile, emotion)?;
 
     // Construct target path
     let target_path = profile.profile_path.join("gif").join(format!("{}.c", emotion));
@@ -192,7 +200,7 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn test_invalid_emotion() {
+    fn test_validate_emotion_rejects_unknown() {
         let profile = ProfileInfo {
             profile: "test".to_string(),
             emotions: vec!["angry".to_string(), "happy".to_string()],
@@ -200,12 +208,12 @@ mod tests {
             profile_path: PathBuf::from("/tmp/test"),
         };
 
-        let result = replace_gif_file(&profile, "invalid", "content");
+        let result = validate_emotion(&profile, "invalid");
         assert!(matches!(result, Err(BuilderError::InvalidEmotion(_, _))));
     }
 
     #[test]
-    fn test_valid_emotion_check() {
+    fn test_validate_emotion_accepts_known() {
         let profile = ProfileInfo {
             profile: "test".to_string(),
             emotions: vec!["angry".to_string(), "happy".to_string()],
@@ -213,9 +221,23 @@ mod tests {
             profile_path: PathBuf::from("/tmp/test_nonexistent"),
         };
 
-        // This will fail at write stage (directory doesn't exist), but emotion validation passes
-        let result = replace_gif_file(&profile, "angry", "test content");
-        // Should not be InvalidEmotion error
-        assert!(!matches!(result, Err(BuilderError::InvalidEmotion(_, _))));
+        assert!(validate_emotion(&profile, "angry").is_ok());
+    }
+
+    #[test]
+    fn test_validate_emotion_writes_nothing() {
+        let profile = ProfileInfo {
+            profile: "test".to_string(),
+            emotions: vec!["angry".to_string()],
+            symbols: vec!["angry".to_string()],
+            profile_path: PathBuf::from("/tmp/gif_tool_validate_emotion_probe"),
+        };
+
+        let _ = fs::remove_dir_all(&profile.profile_path);
+        assert!(validate_emotion(&profile, "angry").is_ok());
+        assert!(
+            !profile.profile_path.exists(),
+            "validate_emotion must not create or write anything"
+        );
     }
 }
