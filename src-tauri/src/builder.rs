@@ -566,6 +566,76 @@ pub fn run_build_sync(project_path: &str) -> Result<BuildResult, BuilderError> {
     run_idf(project_path, &idf_path, "build")
 }
 
+/// Whether the serial port is present right now.
+///
+/// Windows serial ports are device-namespace names, not file paths:
+/// `Path::new("COM3").exists()` is false for a port that is plugged in, which
+/// is how every Windows flash aborted with "Device not found at COM3".
+///
+/// Re-enumerating rather than returning a flat `true` keeps the guard's real
+/// job — catching a board unplugged since the last Scan — and leaves esptool as
+/// the authority when enumeration itself fails.
+#[cfg(windows)]
+fn port_is_present(port: &str) -> bool {
+    // `\\.\COM10` is the device-path spelling some tools hand back; the
+    // enumerator returns the bare name.
+    let want = port.trim_start_matches(r"\\.\");
+    serialport::available_ports()
+        .map(|ports| ports.iter().any(|p| p.port_name.eq_ignore_ascii_case(want)))
+        .unwrap_or(true)
+}
+
+#[cfg(not(windows))]
+fn port_is_present(port: &str) -> bool {
+    Path::new(port).exists()
+}
+
+/// The "port is gone" message, in the terms the platform actually uses.
+fn port_missing_message(port: &str) -> String {
+    if cfg!(windows) {
+        format!(
+            "Device not found at {}. Plug the board in and click Scan — Windows \
+             lists it as a COM port; there is no /dev path to type.",
+            port
+        )
+    } else {
+        format!("Device not found at {}. Check connection and try: ls /dev/cu.*", port)
+    }
+}
+
+/// Recovery hints keyed on esptool's own error text, which differs by platform.
+///
+/// The Unix strings are errno wording. Windows says "Access is denied" when
+/// another program holds the port, and pyserial wraps that in a `PermissionError`
+/// whose message can carry either spelling — so both are matched there. The
+/// `dialout` group does not exist on Windows.
+fn flash_hint(output: &str) -> Option<&'static str> {
+    if cfg!(windows) {
+        if output.contains("Access is denied") || output.contains("Permission denied") {
+            Some(
+                "Close any program holding the port (idf.py monitor, PuTTY, Arduino IDE), \
+                 then try again.",
+            )
+        } else {
+            None
+        }
+    } else if output.contains("Permission denied") {
+        Some("Hint: Add your user to dialout group: sudo usermod -a -G dialout $USER")
+    } else if output.contains("Device or resource busy") {
+        Some("Hint: Close any serial monitors (screen, minicom, idf.py monitor)")
+    } else {
+        None
+    }
+}
+
+/// Appends the platform's recovery hint when the output calls for one.
+fn with_flash_hint(output: String) -> String {
+    match flash_hint(&output) {
+        Some(hint) => format!("{}\n\n{}", output, hint),
+        None => output,
+    }
+}
+
 /// Runs ESP-IDF flash command.
 ///
 /// # Arguments
@@ -577,7 +647,17 @@ pub fn run_build_sync(project_path: &str) -> Result<BuildResult, BuilderError> {
 /// * `Err(BuilderError)` - Command execution failed
 pub fn run_flash_sync(project_path: &str, serial_port: &str) -> Result<BuildResult, BuilderError> {
     let idf_path = resolve_idf_path(config::load_config().idf_path.as_deref())?;
-    run_idf(project_path, &idf_path, &format!("-p {} flash", serial_port))
+
+    if !port_is_present(serial_port) {
+        return Err(BuilderError::WriteError(port_missing_message(serial_port)));
+    }
+
+    let result = run_idf(project_path, &idf_path, &format!("-p {} flash", serial_port))?;
+
+    Ok(BuildResult {
+        output: with_flash_hint(result.output),
+        ..result
+    })
 }
 
 #[cfg(test)]
@@ -942,5 +1022,64 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
         assert!(err.to_string().contains("项目"));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn test_port_is_present_rejects_a_missing_path() {
+        assert!(!port_is_present("/dev/cu.definitely-not-here"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_port_is_present_rejects_an_unenumerated_port() {
+        // A COM name is not a path, but it is also not a licence to skip the
+        // check: a port that is not enumerated is still reported missing.
+        assert!(!port_is_present("COM9999"));
+    }
+
+    #[test]
+    fn test_port_missing_message_is_platform_appropriate() {
+        let msg = port_missing_message("COM3");
+        assert!(msg.contains("COM3"));
+        if cfg!(windows) {
+            assert!(
+                !msg.contains("/dev/cu"),
+                "Windows must not be told to look for a /dev path: {}",
+                msg
+            );
+        } else {
+            assert!(msg.contains("/dev/cu.*"), "got {}", msg);
+        }
+    }
+
+    #[test]
+    fn test_flash_hint_never_leaks_the_other_platform() {
+        if cfg!(windows) {
+            let hint = flash_hint("could not open port COM3: Access is denied").unwrap();
+            assert!(hint.contains("holding the port"), "got {}", hint);
+            assert!(
+                flash_hint("Device or resource busy").is_none(),
+                "errno wording is Unix-only"
+            );
+        } else {
+            assert!(flash_hint("Permission denied").unwrap().contains("dialout"));
+            assert!(flash_hint("Device or resource busy").unwrap().contains("minicom"));
+            assert!(
+                flash_hint("Access is denied").is_none(),
+                "that is Windows wording"
+            );
+        }
+    }
+
+    #[test]
+    fn test_with_flash_hint_appends_only_on_a_match() {
+        assert_eq!(with_flash_hint("plain output".to_string()), "plain output");
+        let with = with_flash_hint("Device or resource busy".to_string());
+        if cfg!(windows) {
+            assert_eq!(with, "Device or resource busy");
+        } else {
+            assert!(with.contains("minicom"));
+        }
     }
 }
