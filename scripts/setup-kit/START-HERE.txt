@@ -1,0 +1,64 @@
+GIF Replacer Tool - START HERE
+==============================
+
+For the full step-by-step instructions, open WINDOWS-SETUP-GUIDE.txt.
+This page is the short version.
+
+What this folder is
+-------------------
+It installs everything the GIF Replacer Tool needs, and (if your team included
+it) a copy of the EmotionDisplay project.
+
+You do NOT need Python, Visual Studio Code, or any developer tools.
+
+
+What happens when you double-click Setup.bat
+--------------------------------------------
+1. It checks your PC.
+2. It installs ESP-IDF 5.5.2 - about 1.6 GB, 15 to 30 minutes.
+   (Skipped if it is already installed.)
+3. It installs the GIF Replacer Tool.
+4. It copies the EmotionDisplay project to C:\EmotionDisplay, if bundled.
+5. It puts a "GIF Replacer Tool" shortcut on your Desktop.
+
+Do not close the window while it is working. When it is done you will see:
+
+    PASS: setup complete.
+
+If Windows asks "Do you want to allow this app to make changes?", click Yes.
+That is the ESP-IDF installer, not this kit.
+
+If Windows says "Windows protected your PC", click More info, then Run anyway.
+The app is not code-signed.
+
+
+Using the app
+-------------
+1. Plug the board into USB.
+2. Double-click "GIF Replacer Tool" on the Desktop.
+3. Step 1: if the project path is empty, click Browse and select
+   C:\EmotionDisplay (or wherever your team put it).
+4. Step 2: drag in a GIF or a .c file.
+   The GIF must be exactly 800 x 480 pixels. The app cannot resize it.
+5. Step 3: click the emotion you want to replace (for example "crying").
+6. Step 4: click Scan, then choose the COM port.
+7. Click "Replace & Build & Flash" and wait 2 to 3 minutes.
+   Do not unplug the board.
+8. Wait for "Done! GIF updated on board."
+
+
+If something goes wrong
+-----------------------
+- No COM port in the list: install the CH340 driver from
+  https://www.wch-ic.com/downloads/CH341SER.EXE.html
+  then unplug/replug the board and click Scan again.
+- A "flash budget" warning: click Cancel and ask your team. It means the
+  firmware may not fit on the device.
+- Setup failed: send this file to whoever supports the tool:
+  %LOCALAPPDATA%\GifReplacerSetup\install.log
+
+
+Keep the original GIFs
+----------------------
+The app overwrites the file for the emotion you choose. There is no Undo
+button. If your team gave you the project folder, keep a spare copy of it.

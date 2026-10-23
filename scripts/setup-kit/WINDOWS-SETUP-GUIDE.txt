@@ -1,0 +1,241 @@
+GIF REPLACER TOOL - WINDOWS SETUP GUIDE
+=======================================
+
+For someone who has never installed developer software.
+Time needed: about 30 minutes, most of it waiting.
+
+You will NOT need Python, Visual Studio Code, Git, Rust, or a command prompt.
+
+
+BEFORE YOU START
+----------------
+You need:
+  - A Windows 10 or Windows 11 PC (64-bit).
+  - About 4 GB of free disk space.
+  - Internet access. A 1.6 GB download happens once.
+  - The USB cable for the robot/display board.
+  - This complete kit folder.
+
+The folder should contain these files:
+
+  Setup.bat
+  install.ps1
+  setup-windows.ps1
+  GIF.Replacer.Tool.exe
+  START-HERE.txt
+  WINDOWS-SETUP-GUIDE.txt      (this file)
+  EmotionDisplay\              (the project; ask your team if missing)
+
+
+PART 1 - ONE-TIME SETUP
+=======================
+
+STEP 1. Put the kit on the PC
+-----------------------------
+Copy the WHOLE folder to a simple location, for example:
+
+  C:\GifReplacerKit
+
+If the kit arrived as a ZIP file, right-click it and choose
+"Extract All" first. Do not run anything from inside the ZIP, from a USB
+stick, or from a network drive.
+
+
+STEP 2. Run Setup.bat
+---------------------
+Open the folder and double-click Setup.bat.
+
+A black window opens. That is normal. Leave it open.
+
+If Windows asks "Do you want to allow this app to make changes?",
+click Yes. That prompt comes from the ESP-IDF installer, not from
+anything harmful.
+
+
+STEP 3. Wait
+------------
+The first run takes 15 to 30 minutes. Most of that is a 1.6 GB download.
+
+You will see progress lines such as:
+
+  ==> Preflight
+  ==> ESP-IDF 5.5.2
+  ==> GIF Replacer Tool application
+  ==> EmotionDisplay project
+  ==> Desktop shortcut
+  ==> USB serial port
+
+Do not close the window. Do not let the PC go to sleep.
+If your PC sleeps during this, the download will be interrupted.
+
+
+STEP 4. Check for success
+-------------------------
+When everything is finished you will see:
+
+  PASS: setup complete.
+  Setup finished successfully.
+
+and then "Press any key to continue". Press a key.
+
+A shortcut named "GIF Replacer Tool" is now on your Desktop.
+
+If you see FAIL instead:
+  - Do not retry many times.
+  - Press Windows key + R, paste the line below, and press Enter:
+
+      %LOCALAPPDATA%\GifReplacerSetup\install.log
+
+  - Send that file to the person who supports this tool.
+
+
+PART 2 - USING THE APP
+======================
+
+STEP 5. Plug in the board
+-------------------------
+Connect the robot/display board to the PC with its USB cable.
+
+
+STEP 6. Open the app
+--------------------
+Double-click "GIF Replacer Tool" on the Desktop.
+
+A black window may flash for a second. That is normal.
+
+If Windows says "Windows protected your PC", click More info, then
+Run anyway. The app is not code-signed; your team supplied it.
+
+
+STEP 7. Check the project path
+------------------------------
+The top box should already contain the project path, for example:
+
+  C:\EmotionDisplay
+
+The line under it should say something like:
+
+  Loaded profile: floki_1 (24 emotions)
+
+If the box is empty or shows an error:
+  - Click Browse.
+  - Select the EmotionDisplay folder.
+  - If you cannot find it, ask your team where they put it.
+
+
+STEP 8. Choose the GIF
+----------------------
+Drag your GIF into box 2, or click the box and browse to it.
+
+IMPORTANT: the GIF must be exactly 800 x 480 pixels.
+The app cannot resize it and will refuse anything else.
+If your file is a different size, ask your team for an 800 x 480
+version. Do not upload company material to a random website to resize it.
+
+
+STEP 9. Choose the emotion
+--------------------------
+In box 3, click the emotion you want to replace, for example:
+
+  crying
+
+
+STEP 10. Choose the COM port
+----------------------------
+In box 4, click Scan, then select the entry that looks like:
+
+  COM3 (USB)
+
+If the list is empty:
+  - Check the USB cable is connected at both ends.
+  - Install the USB driver (see TROUBLESHOOTING below).
+  - Click Scan again.
+
+
+STEP 11. Replace and flash
+--------------------------
+Click "Replace & Build & Flash".
+
+Wait 2 to 3 minutes. The bottom of the window shows the progress.
+
+DO NOT unplug the board while this is running.
+
+You are done when you see:
+
+  Done! GIF updated on board.
+
+The screen should now show the new animation.
+
+
+STEP 12. If a "flash budget" warning appears
+--------------------------------------------
+Click Cancel and ask your team.
+
+It means the new firmware may not fit on the device. Continuing could
+leave the board in a broken state.
+
+
+EVERYDAY USE AFTER THE FIRST TIME
+=================================
+1. Plug in the board.
+2. Double-click the Desktop shortcut.
+3. Drop the GIF, choose the emotion, choose the COM port.
+4. Click Replace & Build & Flash and wait 2 to 3 minutes.
+
+You do not need to run Setup.bat again.
+
+
+TROUBLESHOOTING
+===============
+
+The black window closes immediately
+  You probably double-clicked install.ps1. Use Setup.bat instead.
+
+No COM port / board not found
+  Install the CH340 USB driver from the official WCH page:
+
+    https://www.wch-ic.com/downloads/CH341SER.EXE.html
+
+  Then unplug the board, plug it back in, and click Scan.
+
+"Access is denied" or "Port busy" while flashing
+  Another program is using the port. Close serial monitors or terminal
+  programs, unplug and replug the board, then try again.
+
+"ESP-IDF ... not found"
+  Run Setup.bat again. Re-running is safe and skips finished steps.
+
+Box 3 shows no emotions
+  The project path is wrong or the project folder is incomplete.
+  Ask your team for the full EmotionDisplay folder.
+
+The GIF is rejected because of its size
+  It is not 800 x 480 pixels. Ask your team to resize it.
+
+Antivirus blocks Setup.bat or the app
+  Allow them for this folder. Everything runs locally on your PC.
+
+Setup is very slow or stops downloading
+  Check the internet connection and keep the PC awake. Re-run
+  Setup.bat when you are back online; it resumes what is missing.
+
+
+IMPORTANT THINGS TO KNOW
+========================
+- Replacing an emotion overwrites that emotion's file. The app has no
+  Undo button.
+- If you want to keep the original version, use a profile whose name
+  ends in _1, _2, and so on. Ask your team which profile to use.
+- Setup.bat is safe to run again at any time.
+- This tool only works with the EmotionDisplay project. It is not a
+  general GIF editor.
+- Never unplug the board while "Build" or "Flash" is running.
+- The first build after setup takes longer than later ones.
+
+
+FOR YOUR SUPPORT PERSON
+=======================
+App and launcher:  %LOCALAPPDATA%\GIF Replacer Tool\
+Settings:          %USERPROFILE%\.gif-tool-config.json
+Setup log:         %LOCALAPPDATA%\GifReplacerSetup\install.log
+Project:           C:\EmotionDisplay  (unless your team chose another path)
