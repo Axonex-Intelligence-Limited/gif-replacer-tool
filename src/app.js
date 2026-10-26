@@ -28,6 +28,8 @@ async function initApp() {
     let emotions = [];
     let symbols = [];
     let activeProfile = null;
+    let resettable = [];
+    let busy = false;
 
     // DOM Elements
     const projectPathInput = document.getElementById('project-path-input');
@@ -47,6 +49,9 @@ async function initApp() {
     const clearFileBtn = document.getElementById('clear-file-btn');
 
     const emotionsContainer = document.getElementById('emotions-container');
+    const resetEmotionRow = document.getElementById('reset-emotion-row');
+    const resetEmotionBtn = document.getElementById('reset-emotion-btn');
+    const resetHint = document.getElementById('reset-hint');
     const defaultEmotionSection = document.getElementById('default-emotion-section');
     const defaultEmotionSelect = document.getElementById('default-emotion-select');
     const setDefaultBtn = document.getElementById('set-default-btn');
@@ -172,8 +177,11 @@ async function initApp() {
             profileName.classList.add('success-text');
             emotions = result.emotions;
             symbols = result.symbols || [];
+            resettable = result.resettable || [];
             renderEmotions(emotions);
             renderDefaultEmotionOptions(symbols);
+            resetEmotionRow.style.display = 'block';
+            updateResetButton();
 
             // Load default emotion
             await loadDefaultEmotion();
@@ -192,6 +200,9 @@ async function initApp() {
             emotions = [];
             symbols = [];
             activeProfile = null;
+            resettable = [];
+            currentEmotion = null;
+            resetEmotionRow.style.display = 'none';
             cloneProfileBtn.disabled = true;
             resetDefaultBtn.style.display = 'none';
         }
@@ -199,6 +210,9 @@ async function initApp() {
 
     // Render emotion radio buttons (gif_table keys — used to pick a replace slot)
     function renderEmotions(emotionsList) {
+        // A new list means any previous radio selection is gone.
+        currentEmotion = null;
+
         if (emotionsList.length === 0) {
             emotionsContainer.innerHTML = '<p class="hint">No emotions found</p>';
             return;
@@ -218,6 +232,7 @@ async function initApp() {
             radio.addEventListener('change', () => {
                 currentEmotion = emotion;
                 updateRunButton();
+                updateResetButton();
             });
 
             const text = document.createTextNode(emotion);
@@ -310,6 +325,40 @@ async function initApp() {
         runBtn.disabled = !isReady;
     }
 
+    // Update reset button state and explain why it is unavailable.
+    function updateResetButton() {
+        if (!activeProfile) {
+            resetEmotionBtn.disabled = true;
+            return;
+        }
+
+        const canReset = !!currentEmotion && resettable.includes(currentEmotion);
+        resetEmotionBtn.disabled = !canReset;
+
+        if (!currentEmotion) {
+            resetHint.textContent = 'Select an emotion to see whether it can be reset.';
+        } else if (!canReset) {
+            resetHint.textContent = 'This slot already matches the original, or no original copy was saved for it.';
+        } else {
+            resetHint.textContent = 'Restores the original GIF for this slot, then rebuilds and flashes (2-3 minutes).';
+        }
+    }
+
+    // Availability changes when a replacement creates a backup or a reset makes
+    // the slot match its original again. Ask the backend rather than guessing.
+    async function refreshResettable() {
+        if (!config.project_path) return;
+        try {
+            const result = await invoke('get_active_profile', {
+                projectPath: config.project_path
+            });
+            resettable = result.resettable || [];
+            updateResetButton();
+        } catch (err) {
+            console.error('Failed to refresh reset state:', err);
+        }
+    }
+
     // Step 1: Project path handling
     projectPathInput.addEventListener('input', updateRunButton);
 
@@ -365,6 +414,7 @@ async function initApp() {
 
     // Clone the active profile's base into a numbered clone
     cloneProfileBtn.addEventListener('click', async () => {
+        if (busy) return;
         if (!config.project_path || !activeProfile) return;
         const base = activeProfile.replace(/_\d+$/, '');
         cloneProfileBtn.disabled = true;
@@ -405,6 +455,7 @@ async function initApp() {
     // Change the default startup emotion (write header + build & flash so it
     // actually reaches the board)
     setDefaultBtn.addEventListener('click', async () => {
+        if (busy) return;
         if (!config.project_path) {
             alert('Please set the project path first');
             return;
@@ -420,6 +471,7 @@ async function initApp() {
             return;
         }
 
+        busy = true;
         setDefaultBtn.disabled = true;
         setStatus('running', 'Setting default + building & flashing...');
         outputLog.textContent = '';
@@ -453,7 +505,77 @@ async function initApp() {
             setStatus('error', 'Error: ' + err);
             logOutput('❌ ' + err);
         } finally {
+            busy = false;
             setDefaultBtn.disabled = false;
+        }
+    });
+
+    // Reset one emotion to its original GIF, then build and flash it.
+    resetEmotionBtn.addEventListener('click', async () => {
+        if (busy) return;
+
+        if (!config.project_path) {
+            alert('Please set the EmotionDisplay project path first');
+            return;
+        }
+        if (!currentEmotion) {
+            return;
+        }
+
+        const selectedPort = serialPortSelect.value || serialPortInput.value.trim();
+        if (!selectedPort) {
+            alert('Please select a serial port (needed to flash the restored GIF)');
+            return;
+        }
+
+        const emotion = currentEmotion;
+        const proceed = await confirmInApp(
+            'Restore original GIF',
+            `Restore the original "${emotion}" GIF in profile "${activeProfile}" and flash it to the board?\n\n` +
+            'This rebuilds the firmware and takes 2-3 minutes.',
+            'Restore & Flash'
+        );
+        if (!proceed) {
+            logOutput('ℹ Reset cancelled.');
+            return;
+        }
+
+        busy = true;
+        resetEmotionBtn.disabled = true;
+        runBtn.disabled = true;
+        setStatus('running', 'Restoring original + building & flashing...');
+        outputLog.textContent = '';
+
+        config.last_serial_port = selectedPort;
+        try {
+            await invoke('save_config', { config });
+        } catch (err) {
+            console.error('Failed to save serial port:', err);
+        }
+
+        try {
+            const result = await invoke('reset_and_build_flash', {
+                projectPath: config.project_path,
+                targetEmotion: emotion,
+                serialPort: selectedPort,
+            });
+
+            if (result.success) {
+                setStatus('success', result.message);
+            } else {
+                setStatus('error', result.message);
+            }
+
+            await refreshResettable();
+        } catch (err) {
+            setStatus('error', 'Error: ' + err);
+            logOutput('❌ ' + err);
+        } finally {
+            busy = false;
+            resetEmotionBtn.disabled = false;
+            runBtn.disabled = false;
+            updateRunButton();
+            updateResetButton();
         }
     });
 
@@ -604,6 +726,7 @@ async function initApp() {
             }
         }
 
+        busy = true;
         runBtn.disabled = true;
         setStatus('running', 'Running...');
         outputLog.textContent = '';
@@ -629,10 +752,14 @@ async function initApp() {
             } else {
                 setStatus('error', result.message);
             }
+
+            // A backup now exists for the slot that was replaced.
+            await refreshResettable();
         } catch (err) {
             setStatus('error', 'Error: ' + err);
             logOutput('❌ ' + err);
         } finally {
+            busy = false;
             runBtn.disabled = false;
             updateRunButton();
         }
@@ -653,10 +780,11 @@ async function initApp() {
     // that API only exists when the tauri `dialog-ask` Cargo feature is
     // compiled in, and when it isn't the budget guard silently loses its
     // voice (or worse, blocks every run). This always works.
-    function confirmInApp(title, body) {
+    function confirmInApp(title, body, okLabel = 'Continue anyway') {
         return new Promise((resolve) => {
             confirmTitle.textContent = title;
             confirmBody.textContent = body;
+            confirmOk.textContent = okLabel;
             confirmModal.style.display = 'flex';
 
             function finish(result) {

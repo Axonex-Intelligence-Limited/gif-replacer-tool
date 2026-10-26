@@ -222,9 +222,13 @@ Setup is very slow or stops downloading
 
 IMPORTANT THINGS TO KNOW
 ========================
-- Replacing an emotion overwrites that emotion's file. The app has no
-  Undo button.
-- If you want to keep the original version, use a profile whose name
+- Replacing an emotion overwrites that emotion's file. To change it back,
+  select the emotion and click "Reset Selected Emotion to Original", then
+  confirm. The app saved the original before the first replacement and will
+  restore and flash it.
+- The Reset button is disabled when the slot already matches the original,
+  or when no original copy was saved for it.
+- If you want to keep the stock version separately, use a profile whose name
   ends in _1, _2, and so on. Ask your team which profile to use.
 - Setup.bat is safe to run again at any time.
 - This tool only works with the EmotionDisplay project. It is not a

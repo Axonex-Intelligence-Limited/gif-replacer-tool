@@ -6,6 +6,12 @@
 
 A desktop app that lets a non-technical user drop in an LVGL-converted `.c` GIF file, pick an emotion slot, and have it renamed, wired into the active EmotionDisplay profile, built, and flashed to the ESP32 board — no terminal required.
 
+Before a slot is first replaced, the app saves its original under
+`%LOCALAPPDATA%\GifReplacerTool\stock\`. Selecting any changed slot and pressing
+**Reset Selected Emotion to Original** restores that file, rebuilds, and flashes — so a
+replacement can always be undone from the UI. For clones (`pengu_1`), the base profile
+(`pengu`) is also used as a fallback, which covers slots changed before backups existed.
+
 ## Tech stack
 
 - **Backend**: Rust + Tauri 1.5 (`src-tauri/`)
@@ -49,6 +55,7 @@ src-tauri/src/
   profile.rs   — profile detection, list/switch profiles, get/set default emotion, clone, reset
   parser.rs    — validates + renames LVGL .c symbols
   builder.rs   — writes gif file, runs idf.py build/flash, captures output
+  stock.rs     — saves originals before replacement, restores one slot on reset
   config.rs    — load/save ~/.gif-tool-config.json
   main.rs      — Tauri commands + event emission (build-output stream)
 src/
@@ -57,8 +64,8 @@ src/
 
 ## Tests
 
-59 Rust unit tests — `builder` 25, `profile` 14, `gifconv` 12, `parser` 6, `config` 2 — plus 39
-Pester tests for the Windows setup script. The suite is machine-independent; it uses synthetic
+80 Rust unit tests — `builder` 32, `profile` 14, `gifconv` 12, `parser` 6, `stock` 14,
+`config` 2 — plus 39 Pester tests for the Windows setup script. The suite is machine-independent; it uses synthetic
 fixtures in the temp directory rather than any hardcoded checkout.
 
 ```bash

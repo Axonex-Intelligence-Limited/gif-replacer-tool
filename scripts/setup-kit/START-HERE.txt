@@ -58,7 +58,13 @@ If something goes wrong
   %LOCALAPPDATA%\GifReplacerSetup\install.log
 
 
-Keep the original GIFs
-----------------------
-The app overwrites the file for the emotion you choose. There is no Undo
-button. If your team gave you the project folder, keep a spare copy of it.
+Changing a GIF back
+-------------------
+The app saves the original before it replaces a slot. To change one back,
+select that emotion in the app and click "Reset Selected Emotion to
+Original", then confirm. The app restores the file and flashes it to the
+board. If the button stays disabled, that slot already matches the original
+or no copy was saved for it.
+
+If your team gave you the project folder, it is still worth keeping a
+spare copy.

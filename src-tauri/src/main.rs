@@ -7,6 +7,7 @@ mod parser;
 mod builder;
 mod config;
 mod gifconv;
+mod stock;
 
 use tauri::Manager;
 
@@ -25,10 +26,14 @@ fn get_active_profile(project_path: String) -> Result<ProfileResponse, String> {
     let profile = profile::detect_active_profile(&project_path)
         .map_err(|e| e.to_string())?;
 
+    let resettable =
+        stock::available_emotions(std::path::Path::new(&project_path), &profile);
+
     Ok(ProfileResponse {
         active_profile: profile.profile,
         emotions: profile.emotions,
         symbols: profile.symbols,
+        resettable,
     })
 }
 
@@ -116,6 +121,8 @@ struct ProfileResponse {
     active_profile: String,
     emotions: Vec<String>,
     symbols: Vec<String>,
+    /// Emotions whose slot differs from a restorable original.
+    resettable: Vec<String>,
 }
 
 #[tauri::command]
@@ -208,6 +215,22 @@ async fn replace_and_build_flash(
     builder::validate_emotion(&profile, &target_emotion)
         .map_err(|e| e.to_string())?;
 
+    // Save the slot before either replacement path can write. A cache problem
+    // must not block the replacement; it only costs the reset for this slot.
+    if let Err(e) = stock::ensure_backup(
+        std::path::Path::new(&project_path),
+        &profile,
+        &target_emotion,
+    ) {
+        emit_log(
+            &app_handle,
+            &format!(
+                "⚠ Could not save the original '{}' for reset: {}",
+                target_emotion, e
+            ),
+        );
+    }
+
     let is_gif = source_file_path
         .rsplit('.')
         .next()
@@ -247,6 +270,49 @@ async fn replace_and_build_flash(
     let mut result = do_build_and_flash(app_handle, project_path, serial_port).await?;
     if result.success {
         result.message = "✅ Done! GIF updated on board.".to_string();
+    }
+    Ok(result)
+}
+
+#[tauri::command]
+async fn reset_and_build_flash(
+    app_handle: tauri::AppHandle,
+    project_path: String,
+    target_emotion: String,
+    serial_port: String,
+) -> Result<BuildFlashResponse, String> {
+    let profile = profile::detect_active_profile(&project_path)
+        .map_err(|e| e.to_string())?;
+    builder::validate_emotion(&profile, &target_emotion)
+        .map_err(|e| e.to_string())?;
+
+    let outcome = stock::restore(
+        std::path::Path::new(&project_path),
+        &profile,
+        &target_emotion,
+    )
+    .map_err(|e| e.to_string())?;
+
+    let message = match outcome {
+        stock::RestoreOutcome::FromBackup => format!(
+            "✓ Restored the original {}.c from the saved copy",
+            target_emotion
+        ),
+        stock::RestoreOutcome::FromBase => format!(
+            "✓ Restored {}.c from the base profile '{}'",
+            target_emotion,
+            profile::base_of(&profile.profile)
+        ),
+        stock::RestoreOutcome::RemovedCreatedFile => format!(
+            "✓ Removed {}.c (this slot has no separate file)",
+            target_emotion
+        ),
+    };
+    emit_log(&app_handle, &message);
+
+    let mut result = do_build_and_flash(app_handle, project_path, serial_port).await?;
+    if result.success {
+        result.message = "✅ Done! Original GIF restored on board.".to_string();
     }
     Ok(result)
 }
@@ -388,6 +454,7 @@ fn main() {
             validate_gif_file,
             check_flash_budget,
             replace_and_build_flash,
+            reset_and_build_flash,
             build_and_flash,
             browse_folder,
         ])
